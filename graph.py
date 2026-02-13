@@ -7,8 +7,10 @@ import pandas as pd
 """
     things to add:
     make everything more modular 
-    and make efficient and add more functions
-    """
+	and make efficient and add more functions
+	
+"""
+
 class node:
 	def __init__(self, IPaddress: str, node_id: int, features: torch.Tensor) -> None:
 		self.IPaddress = IPaddress
@@ -144,7 +146,7 @@ def build_flow_table(
 	src_col: str = "src_ip",
 	dst_col: str = "dst_ip",
 	proto_col: str = "protocol",
-	bytes_col: str = "packet_size",
+	bytes_col: str = "packet_length",
 	payload_col: str = "payload_length",
 	udp_len_col: Optional[str] = "udp_length",
 	tcp_flags_col: Optional[str] = "tcp_flags",
