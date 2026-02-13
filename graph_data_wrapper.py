@@ -1,25 +1,25 @@
 import pandas as pd
-from graph import build_snapshot_dataset
+import torch
+import numpy as np
+from torch_geometric.data import Data
+from graph import network, node, build_snapshot_dataset
 
-def load_graph_dataset(packet_csv, label_csv, delta_t=5.0):
+
+# ===============================
+# CSV LOADER (uses graph.py pipeline)
+# ===============================
+
+def load_graph_dataset(packet_csv: str, label_csv: str, delta_t: float = 5.0):
 
     packets_df = pd.read_csv(packet_csv)
     labels_df = pd.read_csv(label_csv)
 
-    # Rename columns properly
     labels_df = labels_df.rename(columns={
         "Unnamed: 0": "packet_index",
-        "x": "label"
+        "x": "label",
     })
 
-    # Merge on packet_index
-    packets_df = packets_df.merge(
-        labels_df,
-        on="packet_index",
-        how="left"
-    )
-
-    # Fill missing labels as 0
+    packets_df = packets_df.merge(labels_df, on="packet_index", how="left")
     packets_df["label"] = packets_df["label"].fillna(0)
 
     data_list, node_map, flows_df = build_snapshot_dataset(
@@ -32,130 +32,370 @@ def load_graph_dataset(packet_csv, label_csv, delta_t=5.0):
     )
     print("Packet-level label distribution:")
     print(packets_df["label"].value_counts())
-
     return data_list
 
 
-import pandas as pd
-import torch
-import numpy as np
-from torch_geometric.data import Data
+# ===============================
+# VECTORISED HELPERS
+# ===============================
+
+def _assign_window_ids(
+    timestamps: np.ndarray,
+    t_min: float, t_max: float,
+    window_size: float, stride: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Assign each timestamp to its overlapping windows.
+
+    For small W: broadcast (N, W) bool mask.
+    For large W: searchsorted + range expansion (avoids O(N*W) memory).
+    Returns (pkt_indices, win_indices) parallel arrays and window_starts.
+    """
+    window_starts = np.arange(t_min, t_max - window_size + 1e-9, stride)
+    if len(window_starts) == 0:
+        window_starts = np.array([t_min])
+    W = len(window_starts)
+    N = len(timestamps)
+
+    # Choose strategy based on matrix size
+    if N * W <= 5_000_000:
+        # Small enough for broadcast
+        ws = window_starts[np.newaxis, :]        # (1, W)
+        ts = timestamps[:, np.newaxis]           # (N, 1)
+        mask = (ts >= ws) & (ts < ws + window_size)
+        return mask, window_starts
+    else:
+        # Large: use searchsorted to find valid window range per packet
+        # For each packet, find the range of windows it belongs to
+        # Window w contains packet if: window_starts[w] <= t < window_starts[w] + window_size
+        # Equivalently: t - window_size < window_starts[w] <= t
+        low = np.searchsorted(window_starts, timestamps - window_size, side="right")
+        high = np.searchsorted(window_starts, timestamps, side="right")
+        # Counts per packet
+        counts = high - low
+        total = int(counts.sum())
+        pkt_idx = np.repeat(np.arange(N), counts)
+        # Build win_idx: concatenate range(low[i], high[i]) for each i
+        # Vectorised: offsets within each packet's range
+        offsets = np.arange(total) - np.repeat(np.cumsum(counts) - counts, counts)
+        win_idx = np.repeat(low, counts) + offsets
+        return (pkt_idx, win_idx), window_starts
+
+
+def _aggregate_flows_numpy(
+    win_ids: np.ndarray,
+    src_codes: np.ndarray,
+    dst_codes: np.ndarray,
+    proto_codes: np.ndarray,
+    port_codes: np.ndarray,
+    timestamps: np.ndarray,
+    bytes_vals: np.ndarray,
+    payload_vals: np.ndarray,
+    label_vals: np.ndarray,
+) -> tuple[np.ndarray, ...]:
+    """Pure-numpy flow aggregation — avoids pandas groupby entirely.
+
+    Returns parallel arrays: (flow_win, flow_src, flow_dst, flow_proto,
+        flow_port, packet_count, total_bytes, mean_payload, mean_iat,
+        std_iat, flow_label) all length F (number of unique flows).
+    """
+    n = len(win_ids)
+
+    # Encode 5 groupby keys into a single int64 composite key for fast sort
+    # Max values needed: win < 2^16, src/dst < 2^16, proto < 2^8, port < 2^16
+    composite = (win_ids.astype(np.int64) << 48 |
+                 src_codes.astype(np.int64) << 32 |
+                 dst_codes.astype(np.int64) << 16 |
+                 proto_codes.astype(np.int64) << 8 |
+                 port_codes.astype(np.int64))
+
+    # Sort by composite key then timestamp for IAT
+    order = np.lexsort((timestamps, composite))
+    comp_sorted = composite[order]
+    ts = timestamps[order]; by = bytes_vals[order]
+    pl = payload_vals[order]; lb = label_vals[order]
+
+    # Detect group boundaries
+    diff = np.empty(n, dtype=bool)
+    diff[0] = True
+    diff[1:] = comp_sorted[1:] != comp_sorted[:-1]
+    group_ids = np.cumsum(diff) - 1
+    n_groups = int(group_ids[-1]) + 1
+
+    # --- aggregations via np.bincount (one pass each) ---
+    pkt_count = np.bincount(group_ids, minlength=n_groups).astype(np.float32)
+    total_bytes = np.bincount(group_ids, weights=by, minlength=n_groups).astype(np.float32)
+    payload_sum = np.bincount(group_ids, weights=pl, minlength=n_groups).astype(np.float32)
+    mean_payload = payload_sum / pkt_count
+
+    # IAT: diff within each group, first packet = 0
+    iat = np.empty(n, dtype=np.float64)
+    iat[0] = 0.0
+    iat[1:] = ts[1:] - ts[:-1]
+    iat[diff] = 0.0  # first of each group → 0
+
+    iat_sum = np.bincount(group_ids, weights=iat, minlength=n_groups)
+    mean_iat = (iat_sum / pkt_count).astype(np.float32)
+
+    # std_iat: sample std (ddof=1) to match pandas .std() default
+    # Formula: sqrt( (sum(x²) - n*mean²) / (n-1) )
+    iat_sq_sum = np.bincount(group_ids, weights=iat * iat, minlength=n_groups)
+    denom = pkt_count - 1.0
+    denom[denom < 1.0] = 1.0  # avoid /0 for single-packet flows
+    variance = (iat_sq_sum - pkt_count * mean_iat.astype(np.float64) ** 2) / denom
+    np.maximum(variance, 0.0, out=variance)  # numerical guard
+    std_iat = np.sqrt(variance).astype(np.float32)
+    # single-packet flows: std = NaN → 0 (matches pandas .fillna(0))
+    std_iat[pkt_count == 1] = 0.0
+
+    # label: max per group
+    label_max = np.full(n_groups, -1, dtype=lb.dtype)
+    np.maximum.at(label_max, group_ids, lb)
+
+    # Extract first-row-per-group for key columns (use original arrays via order)
+    first = np.nonzero(diff)[0]
+    first_orig = order[first]  # indices into original input arrays
+    flow_win = win_ids[first_orig]
+    flow_src = src_codes[first_orig]
+    flow_dst = dst_codes[first_orig]
+    flow_proto = proto_codes[first_orig]
+    flow_port = port_codes[first_orig]
+
+    return (flow_win, flow_src, flow_dst, flow_proto, flow_port,
+            pkt_count, total_bytes, mean_payload, mean_iat, std_iat,
+            label_max)
+
+
+def _compute_node_features_arrays(
+    src_ids: np.ndarray,
+    dst_ids: np.ndarray,
+    total_bytes: np.ndarray,
+    pkt_count: np.ndarray,
+    n_nodes: int,
+) -> np.ndarray:
+    """Build (n_nodes, 6) node features from pre-extracted arrays.
+
+    Features: [bytes_sent, bytes_recv, pkts_sent, pkts_recv,
+               out_degree, in_degree]
+    """
+    feats = np.zeros((n_nodes, 6), dtype=np.float32)
+    np.add.at(feats[:, 0], src_ids, total_bytes)
+    np.add.at(feats[:, 1], dst_ids, total_bytes)
+    np.add.at(feats[:, 2], src_ids, pkt_count)
+    np.add.at(feats[:, 3], dst_ids, pkt_count)
+    np.add.at(feats[:, 4], src_ids, 1)
+    np.add.at(feats[:, 5], dst_ids, 1)
+    return feats
+
+
+def _build_network_fast(
+    local_ids: np.ndarray,
+    local_src: np.ndarray,
+    local_dst: np.ndarray,
+    id_to_ip: dict[int, str],
+    node_feats: torch.Tensor,
+) -> network:
+    """Build a graph.network object without per-element cache invalidation.
+
+    Pre-builds neighbor lists with numpy groupby, then assigns in bulk.
+    """
+    n_local = len(local_ids)
+    n_edges = len(local_src)
+
+    # Pre-build neighbor lists using numpy sort+split (no per-edge Python loop)
+    out_order = np.argsort(local_src, kind="mergesort")
+    out_splits = np.searchsorted(local_src[out_order], np.arange(n_local))
+    in_order = np.argsort(local_dst, kind="mergesort")
+    in_splits = np.searchsorted(local_dst[in_order], np.arange(n_local))
+
+    out_targets = local_dst[out_order]  # destinations for each source
+    in_sources = local_src[in_order]    # sources for each destination
+
+    net = object.__new__(network)
+    net.num_nodes = n_local
+    net.device = torch.device("cpu")
+    net._degree_cache = {}
+    net.nodes = {}
+
+    # Batch-create all nodes with pre-computed neighbor lists
+    for lid in range(n_local):
+        gid = int(local_ids[lid])
+        n = object.__new__(node)
+        n.IPaddress = id_to_ip[gid]
+        n.node_id = lid
+        n.features = node_feats[lid]
+        # Slice neighbor lists from pre-sorted arrays
+        out_lo = int(out_splits[lid])
+        out_hi = int(out_splits[lid + 1]) if lid + 1 < n_local else n_edges
+        n.out_neighbors = out_targets[out_lo:out_hi].tolist()
+        in_lo = int(in_splits[lid])
+        in_hi = int(in_splits[lid + 1]) if lid + 1 < n_local else n_edges
+        n.in_neighbors = in_sources[in_lo:in_hi].tolist()
+        net.nodes[lid] = n
+
+    # Pre-build edge_index cache so later queries are free
+    ei = torch.from_numpy(np.vstack((local_src, local_dst)).astype(np.int64))
+    net._edge_index_cache = ei
+    net.x = node_feats
+    return net
 
 
 # ===============================
 # SLIDING WINDOW GRAPH BUILDER
+# Builds graph.network per window → PyG Data with node features
 # ===============================
 
 def build_sliding_window_graphs(
-    packets_df,
-    window_size=2.0,
-    stride=1.0,
-    bytes_col="packet_length",
-    label_col="label",
-):
-    graphs = []
+    packets_df: pd.DataFrame,
+    window_size: float = 2.0,
+    stride: float = 1.0,
+    bytes_col: str = "packet_length",
+    label_col: str = "label",
+) -> list[Data]:
 
-    t_min = packets_df["timestamp"].min()
-    t_max = packets_df["timestamp"].max()
+    ts_vals = packets_df["timestamp"].values.astype(np.float64)
+    t_min, t_max = ts_vals.min(), ts_vals.max()
 
-    current_start = t_min
+    # ---- vectorised window assignment ----
+    result, window_starts = _assign_window_ids(ts_vals, t_min, t_max,
+                                               window_size, stride)
+    if isinstance(result, tuple):
+        # searchsorted path: already (pkt_idx, win_idx)
+        pkt_idx, win_idx = result
+    else:
+        # broadcast mask path
+        pkt_idx, win_idx = np.nonzero(result)
+    if len(pkt_idx) == 0:
+        return []
 
-    while current_start + window_size <= t_max:
-        current_end = current_start + window_size
+    # ---- encode IPs / protocol / port to integers ONCE (pd.factorize is ~20x faster than np.unique on strings) ----
+    src_raw = packets_df["src_ip"].values
+    dst_raw = packets_df["dst_ip"].values
+    bytes_raw = packets_df[bytes_col].values.astype(np.float64)
+    payload_raw = packets_df["payload_length"].values.astype(np.float64)
+    label_raw = packets_df[label_col].values.astype(np.int64)
 
-        window_df = packets_df[
-            (packets_df["timestamp"] >= current_start)
-            & (packets_df["timestamp"] < current_end)
-        ]
+    # pd.factorize on concatenated src+dst gives consistent codes
+    all_ips_arr = np.concatenate([src_raw, dst_raw])
+    ip_codes_all, unique_ips = pd.factorize(all_ips_arr, sort=True)
+    ip_to_id: dict[str, int] = {ip: int(i) for i, ip in enumerate(unique_ips)}
+    id_to_ip: dict[int, str] = {int(i): str(ip) for i, ip in enumerate(unique_ips)}
+    n_total = len(packets_df)
+    src_codes_full = ip_codes_all[:n_total]
+    dst_codes_full = ip_codes_all[n_total:]
 
-        if len(window_df) == 0:
-            current_start += stride
+    proto_codes_full, _ = pd.factorize(packets_df["protocol"].values, sort=True)
+    port_codes_full, _ = pd.factorize(packets_df["dst_port"].values, sort=True)
+
+    # ---- explode to per-(packet, window) rows using integer arrays only ----
+    e_win = win_idx
+    e_src = src_codes_full[pkt_idx]
+    e_dst = dst_codes_full[pkt_idx]
+    e_proto = proto_codes_full[pkt_idx]
+    e_port = port_codes_full[pkt_idx]
+    e_ts = ts_vals[pkt_idx]
+    e_bytes = bytes_raw[pkt_idx]
+    e_payload = payload_raw[pkt_idx]
+    e_label = label_raw[pkt_idx]
+
+    # ---- pure-numpy flow aggregation ----
+    (flow_win, flow_src, flow_dst, flow_proto, flow_port,
+     pkt_count, total_bytes, mean_payload, mean_iat, std_iat,
+     flow_label) = _aggregate_flows_numpy(
+        e_win, e_src, e_dst, e_proto, e_port,
+        e_ts, e_bytes, e_payload, e_label)
+
+    # ---- edge feature + label arrays ----
+    feat_arr = np.column_stack([pkt_count, total_bytes, mean_payload,
+                                mean_iat, std_iat]).astype(np.float32)
+    label_arr = flow_label.astype(np.int64)
+    src_arr = flow_src.astype(np.int64)
+    dst_arr = flow_dst.astype(np.int64)
+    wid_arr = flow_win
+
+    # ---- split indices by window_id (already sorted by win from aggregation) ----
+    order = np.argsort(wid_arr, kind="mergesort")
+    wid_sorted = wid_arr[order]
+    split_pts = np.searchsorted(wid_sorted,
+                                np.arange(wid_sorted[-1] + 1),
+                                side="left")
+    split_pts = np.append(split_pts, len(wid_sorted))
+    num_global = len(unique_ips)
+
+    # ---- per-window: build network + node features → PyG Data ----
+    graphs: list[Data] = []
+
+    for w in range(len(split_pts) - 1):
+        lo, hi = split_pts[w], split_pts[w + 1]
+        if lo == hi:
             continue
+        idx = order[lo:hi]
 
-        # -------- FLOW AGGREGATION --------
-        keys = ["src_ip", "dst_ip", "protocol", "dst_port"]
+        w_src = src_arr[idx]
+        w_dst = dst_arr[idx]
+        w_bytes = total_bytes[idx]
+        w_pkts = pkt_count[idx]
 
-        grouped = window_df.groupby(keys).agg(
-            packet_count=("timestamp", "count"),
-            total_bytes=(bytes_col, "sum"),
-            mean_payload=("payload_length", "mean"),
-            mean_iat=("timestamp", lambda x: x.diff().fillna(0).mean()),
-            std_iat=("timestamp", lambda x: x.diff().fillna(0).std()),
-            flow_label=(label_col, lambda x: x.mode()[0])
-        ).reset_index()
+        # Preserve first-occurrence order (src then dst) to match original
+        combined = np.concatenate([w_src, w_dst])
+        _, first_occ = np.unique(combined, return_index=True)
+        local_ids = combined[np.sort(first_occ)]
+        n_local = len(local_ids)
 
-        grouped["std_iat"] = grouped["std_iat"].fillna(0.0)
+        # Remap global IDs → local 0..n-1 via lookup array (no dict)
+        remap = np.empty(num_global, dtype=np.int64)
+        remap[local_ids] = np.arange(n_local, dtype=np.int64)
+        local_src = remap[w_src]
+        local_dst = remap[w_dst]
 
-        # -------- NODE MAPPING --------
-        ips = pd.concat([grouped["src_ip"], grouped["dst_ip"]]).unique()
-        node_map = {ip: i for i, ip in enumerate(ips)}
+        # Node features directly on local size (no global alloc + slice)
+        node_feats_np = _compute_node_features_arrays(
+            local_src, local_dst, w_bytes, w_pkts, n_local)
+        node_feats = torch.from_numpy(node_feats_np)
 
-        src_ids = grouped["src_ip"].map(node_map).values
-        dst_ids = grouped["dst_ip"].map(node_map).values
+        # Build network object (fast path — no per-element cache clears)
+        net = _build_network_fast(local_ids, local_src, local_dst,
+                                  id_to_ip, node_feats)
 
-        edge_index = torch.from_numpy(
-            np.vstack((src_ids, dst_ids))
-        ).long()
-
-        edge_attr = torch.tensor(
-            grouped[
-                ["packet_count", "total_bytes",
-                 "mean_payload", "mean_iat", "std_iat"]
-            ].values,
-            dtype=torch.float
-        )
-
-        y = torch.tensor(grouped["flow_label"].values, dtype=torch.long)
-
-        data = Data(
-            edge_index=edge_index,
-            edge_attr=edge_attr,
-            y=y,
-            num_nodes=len(node_map)
-        )
-
-        data.window_start = current_start
+        # Build PyG Data directly (skip net.to_pyg_data overhead)
+        ei = net._edge_index_cache
+        data = Data(edge_index=ei, x=node_feats, num_nodes=n_local)
+        data.edge_attr = torch.from_numpy(feat_arr[idx])
+        data.y = torch.from_numpy(label_arr[idx])
+        data.window_start = float(window_starts[w])
+        data.network = net
         graphs.append(data)
-
-        current_start += stride
 
     return graphs
 
 
 # ===============================
-# ANALYSIS FUNCTION
+# ANALYSIS (vectorised)
 # ===============================
 
-def analyze_graphs(graphs):
+def analyze_graphs(graphs: list[Data]) -> None:
+    if not graphs:
+        print("No graphs to analyse.")
+        return
 
-    total_edges = 0
-    total_nodes = 0
-    all_labels = []
-
-    for g in graphs:
-        total_edges += g.edge_index.shape[1]
-        total_nodes += g.num_nodes
-        all_labels.append(g.y)
-
-    all_labels = torch.cat(all_labels)
+    edge_counts = np.array([g.edge_index.shape[1] for g in graphs])
+    node_counts = np.array([g.num_nodes for g in graphs])
+    all_labels = torch.cat([g.y for g in graphs])
 
     num_graphs = len(graphs)
-    num_edges = total_edges
-    num_nodes_avg = total_nodes / num_graphs
-
-    num_classes = torch.unique(all_labels)
+    classes = torch.unique(all_labels)
+    total = len(all_labels)
 
     print("\n====== GRAPH ANALYSIS ======")
     print("Number of graphs:", num_graphs)
-    print("Total edges:", num_edges)
-    print("Average edges per graph:", num_edges / num_graphs)
-    print("Average nodes per graph:", num_nodes_avg)
+    print("Total edges:", int(edge_counts.sum()))
+    print("Average edges per graph:", f"{edge_counts.mean():.1f}")
+    print("Average nodes per graph:", f"{node_counts.mean():.1f}")
+    print("Node feature dim:", graphs[0].x.shape[1] if graphs[0].x is not None else 0)
+    print("Edge feature dim:", graphs[0].edge_attr.shape[1])
+    print("Unique classes:", classes.tolist())
 
-    print("Unique classes:", num_classes.tolist())
-
-    for c in num_classes:
+    for c in classes:
         count = (all_labels == c).sum().item()
-        print(f"Class {int(c)} count:", count,
-              f"({100*count/len(all_labels):.2f}%)")
+        print(f"Class {int(c)} count: {count} ({100*count/total:.2f}%)")
 
     print("============================\n")
