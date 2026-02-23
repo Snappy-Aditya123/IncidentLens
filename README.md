@@ -45,6 +45,7 @@ The agent doesn't just say "this is malicious" — it says *"this flow has 47x t
 - **Dual GNN Architecture** — EdgeGNN (GraphSAGE + Edge MLP) for static classification and EvolveGCN-O (LSTM-evolved weights) for capturing temporal attack patterns
 - **Counterfactual Analysis** — Feature-level diffs ("what would need to change?") and graph-level edge perturbation ("which connections drive the anomaly?")
 - **Real-Time WebSocket Streaming** — Every thinking step, tool call, and conclusion is streamed to the frontend as it happens
+- **Interactive Investigation Dashboard** — React + D3.js frontend with a 4-step guided wizard (Overview → ES Logs → Network Graph → Counterfactual Explainability), shadcn/ui components, and Tailwind v4 dark theme
 - **Kitsune Dataset Validated** — Tested on 4M+ real SSDP flood attack packets with ground-truth labels
 
 ---
@@ -52,12 +53,20 @@ The agent doesn't just say "this is malicious" — it says *"this flow has 47x t
 ## How It Works
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  User Query: "Why is 192.168.100.5 anomalous?"          │
-└────────────────────────┬────────────────────────────────┘
-                         │
-                         ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  React Frontend (Dashboard + 4-Step Investigation Wizard)        │
+│  ┌────────────┐  ┌──────────────┐  ┌──────────┐  ┌───────────┐  │
+│  │  Overview   │→ │ ES Log View  │→ │ D3 Graph │→ │Counterfact│  │
+│  └────────────┘  └──────────────┘  └──────────┘  └───────────┘  │
+└───────────────────────┬──────────────────────────────────────────┘
+                        │ REST + WebSocket
+                        ▼
               ┌─────────────────────┐
+              │  FastAPI Server      │
+              │  (REST + WS stream)  │
+              └──────┬───────────────┘
+                     │
+              ┌──────▼──────────────┐
               │     LLM Agent       │ ◄── OpenAI / Azure / Ollama
               │  (Multi-Step Loop)  │
               └──────┬──────────────┘
@@ -81,7 +90,7 @@ The agent doesn't just say "this is malicious" — it says *"this flow has 47x t
           └───────────────────────┘
 ```
 
-**Investigation loop:** The agent detects anomalies → retrieves flow details → runs counterfactual analysis (kNN nearest-normal + feature diff) → assesses severity via z-score → finds similar historical incidents → synthesizes a structured report with root cause, evidence, and recommendations.
+**Investigation loop:** The frontend walks analysts through a 4-step guided wizard. The backend agent detects anomalies → retrieves flow details → runs counterfactual analysis (kNN nearest-normal + feature diff) → assesses severity → finds similar incidents → streams each reasoning step back to the UI in real time via WebSocket.
 
 ---
 
@@ -152,29 +161,42 @@ python src/Backend/main.py serve --port 8000
 
 ---
 
-## Architecture
+## Project Structure
 
 ```
 IncidentLens/
 ├── src/
-│   ├── Backend/                    # Python backend
-│   │   ├── main.py                 # Unified CLI entry point
-│   │   ├── agent.py                # LLM agent — multi-step reasoning loop
-│   │   ├── agent_tools.py          # 15 tools with OpenAI function-calling schemas
-│   │   ├── server.py               # FastAPI server (REST + WebSocket)
-│   │   ├── wrappers.py             # ES client, indexing, kNN, counterfactuals
-│   │   ├── graph_data_wrapper.py   # Vectorised sliding-window graph builder
-│   │   ├── graph.py                # Core graph data structures
-│   │   ├── train.py                # EdgeGNN (GraphSAGE) training pipeline
-│   │   ├── temporal_gnn.py         # EvolveGCN-O semi-temporal model
-│   │   ├── gnn_interface.py        # Abstract GNN encoder contract
-│   │   ├── ingest_pipeline.py      # 8-step data ingestion pipeline
-│   │   ├── csv_to_json.py          # CSV → NDJSON converter
-│   │   └── tests/                  # 166 tests (100% pass)
-│   ├── Front/                      # Frontend (coming soon)
-│   └── docker-compose.yml          # ES 8.12 + Kibana 8.12
-├── data/                           # NDJSON data files
-├── EDA/                            # Exploratory analysis notebooks
+│   ├── Backend/                        # Python backend
+│   │   ├── main.py                     # Unified CLI entry point
+│   │   ├── agent.py                    # LLM agent — multi-step reasoning loop
+│   │   ├── agent_tools.py              # 15 tools with OpenAI function-calling schemas
+│   │   ├── server.py                   # FastAPI server (REST + WebSocket)
+│   │   ├── wrappers.py                 # ES client, indexing, kNN, counterfactuals
+│   │   ├── graph_data_wrapper.py       # Vectorised sliding-window graph builder
+│   │   ├── graph.py                    # Core graph data structures
+│   │   ├── train.py                    # EdgeGNN (GraphSAGE) training pipeline
+│   │   ├── temporal_gnn.py             # EvolveGCN-O semi-temporal model
+│   │   ├── gnn_interface.py            # Abstract GNN encoder contract
+│   │   ├── ingest_pipeline.py          # 8-step data ingestion pipeline
+│   │   ├── csv_to_json.py              # CSV → NDJSON converter
+│   │   └── tests/                      # 166 tests (100% pass)
+│   ├── Front/                          # React frontend
+│   │   ├── app/
+│   │   │   ├── App.tsx                  # Root — RouterProvider + Toaster
+│   │   │   ├── routes.tsx               # Route definitions
+│   │   │   ├── components/
+│   │   │   │   ├── Dashboard.tsx         # Incident list + stats
+│   │   │   │   ├── Investigation.tsx     # 4-step wizard orchestrator
+│   │   │   │   ├── investigation/
+│   │   │   │   │   ├── ElasticsearchStep.tsx  # ES log analysis
+│   │   │   │   │   ├── GNNStep.tsx            # D3 network graph
+│   │   │   │   │   └── CounterfactualStep.tsx # Explainability
+│   │   │   │   └── ui/                  # 48 shadcn/ui primitives
+│   │   │   └── data/mockData.ts         # TypeScript types + mock data
+│   │   └── styles/                      # Tailwind v4 + oklch theme tokens
+│   └── docker-compose.yml               # ES 8.12 + Kibana 8.12
+├── data/                                # NDJSON data files
+├── EDA/                                 # Exploratory analysis notebooks
 ├── requirements.txt
 └── LICENSE
 ```
