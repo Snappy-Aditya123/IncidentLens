@@ -1,196 +1,274 @@
+<div align="center">
+
 # IncidentLens
 
-A multi-step AI agent for network incident investigation, combining Elasticsearch, Graph Neural Networks, and counterfactual explainability.
+### AI-Powered Network Incident Investigation with Explainable Graph Intelligence
 
-Built for the **Elasticsearch Agent Builder Hackathon**.
+[![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://python.org)
+[![Elasticsearch 8.12](https://img.shields.io/badge/Elasticsearch-8.12-005571?logo=elasticsearch&logoColor=white)](https://elastic.co)
+[![PyTorch Geometric](https://img.shields.io/badge/PyTorch%20Geometric-2.6-EE4C2C?logo=pytorch&logoColor=white)](https://pyg.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+**IncidentLens** doesn't just detect threats — it *explains* them. An autonomous AI agent that investigates network anomalies, uncovers root causes through counterfactual reasoning, and delivers actionable intelligence in real time.
+
+[Getting Started](#-getting-started) · [How It Works](#-how-it-works) · [API Reference](#-api-reference) · [Architecture](#-architecture)
+
+</div>
 
 ---
 
-## Overview
+## The Problem
 
-IncidentLens analyzes network traffic to:
+Security teams drown in alerts. Traditional tools flag anomalies but can't answer the critical question: **"Why is this suspicious, and what would need to change for it to be normal?"**
 
-1. **Detect** anomalous flows using labels, model scores, or statistical deviation
-2. **Investigate** root causes via feature analysis, significant terms, and counterfactual explanations
-3. **Explain** what would need to change for an anomalous flow to be classified as normal
-4. **Assess severity** (low/medium/high) based on z-score deviation from normal baselines
-5. **Find similar historical incidents** via kNN embedding search
-6. **Recommend actions** (block IP, rate-limit, investigate further)
+Analysts spend hours manually correlating logs, comparing traffic patterns, and trying to articulate *what specifically makes a flow anomalous* — work that is repetitive, slow, and error-prone.
 
-### Stack
+## Our Solution
 
-- **Elasticsearch 8.12** — scalable indexing, kNN vector search, aggregations, significant terms
-- **Kitsune SSDP Flood Dataset** — 4M+ real network packets with ground-truth attack labels
-- **PyTorch Geometric** — sliding-window temporal graph construction
-- **OpenAI-compatible LLM** — multi-step reasoning agent with tool calling
-- **FastAPI + WebSocket** — real-time streaming of investigation events
+IncidentLens is an **autonomous investigation agent** that combines three powerful capabilities:
+
+| Capability | What It Does |
+|:---|:---|
+| **Graph Neural Networks** | Models network traffic as temporal graphs — nodes are IPs, edges are flows — to capture structural patterns invisible to flat feature analysis |
+| **Counterfactual Explainability** | For every anomaly, finds the *nearest normal flow* and tells you exactly which features (packet count, byte volume, inter-arrival time) would need to change and by how much |
+| **Elasticsearch-Powered Retrieval** | kNN vector search over flow embeddings, significant-terms aggregation, and feature distribution analysis — all powering a multi-step LLM reasoning loop |
+
+The agent doesn't just say "this is malicious" — it says *"this flow has 47x the normal packet count, 12x the byte volume, and the nearest non-attack flow with similar structure is X; reducing packet_count from 450 to 9 would flip the classification."*
+
+---
+
+## Key Features
+
+- **Autonomous Multi-Step Investigation** — An LLM agent with 15 specialized tools iterates through detection → analysis → explanation → severity assessment → recommendation, streaming each reasoning step in real time
+- **Temporal Graph Construction** — Sliding-window graph builder converts raw packets into PyG `Data` objects with node features (degree, traffic volume) and edge features (packet count, bytes, payload, inter-arrival time)
+- **Dual GNN Architecture** — EdgeGNN (GraphSAGE + Edge MLP) for static classification and EvolveGCN-O (LSTM-evolved weights) for capturing temporal attack patterns
+- **Counterfactual Analysis** — Feature-level diffs ("what would need to change?") and graph-level edge perturbation ("which connections drive the anomaly?")
+- **Real-Time WebSocket Streaming** — Every thinking step, tool call, and conclusion is streamed to the frontend as it happens
+- **Kitsune Dataset Validated** — Tested on 4M+ real SSDP flood attack packets with ground-truth labels
+
+---
+
+## How It Works
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  User Query: "Why is 192.168.100.5 anomalous?"          │
+└────────────────────────┬────────────────────────────────┘
+                         │
+                         ▼
+              ┌─────────────────────┐
+              │     LLM Agent       │ ◄── OpenAI / Azure / Ollama
+              │  (Multi-Step Loop)  │
+              └──────┬──────────────┘
+                     │ tool calls
+        ┌────────────┼────────────────┐
+        ▼            ▼                ▼
+  ┌───────────┐ ┌──────────┐  ┌──────────────┐
+  │  Detect   │ │ Analyze  │  │   Explain    │
+  │ Anomalies │ │ Features │  │Counterfactual│
+  └─────┬─────┘ └────┬─────┘  └──────┬───────┘
+        │             │               │
+        └─────────────┼───────────────┘
+                      ▼
+          ┌───────────────────────┐
+          │   Elasticsearch 8.12  │
+          │                       │
+          │  ▸ incidentlens-flows │  ← aggregated flow features
+          │  ▸ ...-embeddings     │  ← kNN vector search (cosine)
+          │  ▸ ...-counterfactuals│  ← feature diffs + explanations
+          │  ▸ ...-packets        │  ← raw packet records
+          └───────────────────────┘
+```
+
+**Investigation loop:** The agent detects anomalies → retrieves flow details → runs counterfactual analysis (kNN nearest-normal + feature diff) → assesses severity via z-score → finds similar historical incidents → synthesizes a structured report with root cause, evidence, and recommendations.
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- Python 3.12+
+- Docker (for Elasticsearch + Kibana)
+- An OpenAI-compatible API key (OpenAI, Azure OpenAI, or local Ollama)
+
+### 1. Clone & Install
+
+```bash
+git clone https://github.com/Snappy-Aditya123/IncidentLens.git
+cd IncidentLens
+
+python -m venv .venv
+.venv\Scripts\activate          # Windows
+# source .venv/bin/activate     # macOS / Linux
+
+pip install -r requirements.txt
+```
+
+### 2. Start Elasticsearch
+
+```bash
+docker compose -f src/docker-compose.yml up -d
+```
+
+Elasticsearch: http://localhost:9200 · Kibana: http://localhost:5601
+
+### 3. Verify Connectivity
+
+```bash
+python src/Backend/main.py health
+```
+
+### 4. Prepare Data
+
+```bash
+# Convert CSV → NDJSON (first time only)
+python src/Backend/main.py convert \
+  --packets path/to/ssdp_packets_rich.csv \
+  --labels path/to/SSDP_Flood_labels.csv
+
+# Run full ingestion + analysis pipeline
+python src/Backend/main.py ingest
+```
+
+### 5. Investigate
+
+```bash
+export OPENAI_API_KEY=sk-...
+
+# Auto-detect and investigate anomalies
+python src/Backend/main.py investigate
+
+# Ask a specific question
+python src/Backend/main.py investigate "why is 192.168.100.5 anomalous?"
+```
+
+### 6. Start the API Server
+
+```bash
+python src/Backend/main.py serve --port 8000
+```
 
 ---
 
 ## Architecture
 
-```text
-User query
-  |
-  v
-[LLM Agent] <-- tool-calling loop (OpenAI API)
-  |  |  |
-  v  v  v
-[13 Agent Tools]  -- wrappers.py --> [Elasticsearch :9200]
-                                         |
-                                    [3 indices]
-                                    - incidentlens-flows
-                                    - incidentlens-embeddings
-                                    - incidentlens-counterfactuals
 ```
-
-The agent iteratively calls tools, reasons about results, and produces a structured investigation summary with severity, root cause, evidence, and recommendations.
+IncidentLens/
+├── src/
+│   ├── Backend/                    # Python backend
+│   │   ├── main.py                 # Unified CLI entry point
+│   │   ├── agent.py                # LLM agent — multi-step reasoning loop
+│   │   ├── agent_tools.py          # 15 tools with OpenAI function-calling schemas
+│   │   ├── server.py               # FastAPI server (REST + WebSocket)
+│   │   ├── wrappers.py             # ES client, indexing, kNN, counterfactuals
+│   │   ├── graph_data_wrapper.py   # Vectorised sliding-window graph builder
+│   │   ├── graph.py                # Core graph data structures
+│   │   ├── train.py                # EdgeGNN (GraphSAGE) training pipeline
+│   │   ├── temporal_gnn.py         # EvolveGCN-O semi-temporal model
+│   │   ├── gnn_interface.py        # Abstract GNN encoder contract
+│   │   ├── ingest_pipeline.py      # 8-step data ingestion pipeline
+│   │   ├── csv_to_json.py          # CSV → NDJSON converter
+│   │   └── tests/                  # 166 tests (100% pass)
+│   ├── Front/                      # Frontend (coming soon)
+│   └── docker-compose.yml          # ES 8.12 + Kibana 8.12
+├── data/                           # NDJSON data files
+├── EDA/                            # Exploratory analysis notebooks
+├── requirements.txt
+└── LICENSE
+```
 
 ---
 
-## Quick Start
+## API Reference
 
-### 1. Start Elasticsearch + Kibana
+### REST Endpoints
 
-```bash
-docker compose up -d
-```
+| Method | Endpoint | Description |
+|:-------|:---------|:------------|
+| `GET` | `/health` | Server + Elasticsearch health check |
+| `POST` | `/api/investigate` | Run a full investigation (returns all events as JSON) |
+| `POST` | `/api/detect` | Quick anomaly detection without the LLM agent |
+| `GET` | `/api/flows` | List flows with optional filters (label, src_ip, dst_ip) |
+| `GET` | `/api/stats` | Feature statistics grouped by label |
+| `POST` | `/api/counterfactual` | Run counterfactual analysis for a specific flow |
+| `GET` | `/api/severity/{flow_id}` | Assess anomaly severity (low / medium / high) |
+| `GET` | `/api/similar/{flow_id}` | Find similar historical incidents via kNN |
+| `GET` | `/api/tools` | List all available agent tools |
 
-Services:
+### WebSocket
 
-- Elasticsearch: <http://localhost:9200>
-- Kibana: <http://localhost:5601>
+| Endpoint | Description |
+|:---------|:------------|
+| `WS /ws/investigate` | Stream investigation events in real time |
 
-### 2. Install dependencies
+**Protocol:** Connect → send `{"query": "..."}` → receive streaming events → receive `{"type": "done"}`.
 
-```bash
-python -m venv .venv
-.venv\Scripts\activate       # Windows
-pip install -r requirements.txt
-```
+Event types: `thinking`, `tool_call`, `tool_result`, `conclusion`, `error`, `status`.
 
-### 3. Verify connectivity
+---
 
-```bash
-python main.py health
-```
+## Agent Tools (15)
 
-### 4. Convert CSV data to NDJSON (first time only)
+| Tool | Purpose |
+|:-----|:--------|
+| `es_health_check` | Cluster health and connectivity |
+| `search_flows` | Query flows with filters (label, IP, thresholds) |
+| `get_flow` | Retrieve a single flow document by ID |
+| `detect_anomalies` | Detect anomalies via label, model score, or statistics |
+| `feature_stats` | Extended statistics per feature grouped by label |
+| `feature_percentiles` | Percentile distributions for any feature |
+| `significant_terms` | IPs/protocols overrepresented in attack traffic |
+| `counterfactual_analysis` | Find nearest normal flow + compute per-feature diffs |
+| `counterfactual_narrative` | Human-readable counterfactual explanation |
+| `explain_flow` | ES `_explain` API — why a flow matched a query |
+| `search_raw_packets` | Search individual raw packet records |
+| `find_similar_incidents` | kNN embedding search for historical matches |
+| `assess_severity` | Z-score severity assessment (low / medium / high) |
+| `graph_edge_counterfactual` | Identify which edges (connections) drive the anomaly |
+| `graph_window_comparison` | Compare normal vs anomalous time windows structurally |
 
-```bash
-python main.py convert --packets path/to/ssdp_packets_rich.csv --labels path/to/SSDP_Flood_labels.csv
-```
+---
 
-### 5. Run ingestion + analysis pipeline
+## Elasticsearch Indices
 
-```bash
-python main.py ingest                    # full pipeline
-python main.py ingest --max-rows 10000   # quick test
-```
+| Index | Contents |
+|:------|:---------|
+| `incidentlens-flows` | Aggregated flow features — packet_count, total_bytes, mean_payload, mean_iat, std_iat, label, predictions |
+| `incidentlens-embeddings` | Per-flow embedding vectors (dense_vector with cosine similarity, kNN-indexed) |
+| `incidentlens-counterfactuals` | Counterfactual diffs — per-feature original vs CF value, direction, percent change |
+| `incidentlens-packets` | Raw individual packet records from the dataset |
 
-This builds temporal graphs, indexes flows + embeddings, and runs counterfactual analysis.
+---
 
-### 6. Run AI agent investigation
+## Technical Highlights
 
-```bash
-export OPENAI_API_KEY=sk-...                          # or use Ollama:
-# export OPENAI_BASE_URL=http://localhost:11434/v1
-# export OPENAI_API_KEY=ollama
-
-python main.py investigate                            # auto-detect anomalies
-python main.py investigate "why is 192.168.100.5 anomalous?"
-```
-
-### 7. Start API server (optional, for frontend)
-
-```bash
-python main.py serve --port 8000
-```
+- **Vectorized graph construction** — Pure numpy sliding-window builder with composite key packing, broadcast window assignment, and pre-built neighbor lists. Zero Python for-loops over packets.
+- **Dual GNN models** — EdgeGNN (GraphSAGE + Edge MLP) for static edge classification; EvolveGCN-O (LSTM-evolved GCN weights) for temporal pattern detection across graph sequences.
+- **Pre-processed GNN bottleneck removal** — Self-loops and degree normalization cached at data-prep time; LSTM weight evolution flattened from O(hidden_dim) batches to O(1).
+- **Singleton ES client** with retry logic, bulk indexing with batch MD5 flow-ID generation, and pre-converted numpy→Python type coercion for minimal per-document overhead.
+- **166 tests** covering graph construction, GNN forward/backward passes, temporal sequences, normalization, and edge-case handling — all passing.
 
 ---
 
 ## CLI Reference
 
 | Command | Description |
-| ------- | ----------- |
-| `python main.py health` | Check ES connectivity and index doc counts |
-| `python main.py ingest` | Run full data pipeline (graphs, flows, embeddings, counterfactuals) |
-| `python main.py investigate [query]` | Run LLM agent investigation |
-| `python main.py serve` | Start REST + WebSocket API server |
-| `python main.py convert` | Convert raw CSV to NDJSON |
+|:--------|:------------|
+| `python src/Backend/main.py health` | Check ES connectivity and index document counts |
+| `python src/Backend/main.py ingest` | Run full pipeline: graphs → flows → embeddings → counterfactuals |
+| `python src/Backend/main.py investigate [query]` | Run the LLM agent investigation |
+| `python src/Backend/main.py serve` | Start the REST + WebSocket API server |
+| `python src/Backend/main.py convert` | Convert raw CSV data to NDJSON |
 
 ---
 
-## Agent Tools (13 total)
+## Team
 
-| Tool | Description |
-| ---- | ----------- |
-| `es_health_check` | Cluster health and connectivity |
-| `search_flows` | Query flows index with filters (label, IP, packet count) |
-| `get_flow` | Retrieve a single flow by ID |
-| `detect_anomalies` | Detect anomalies via label, model score, or statistical method |
-| `feature_stats` | Extended statistics per feature grouped by label |
-| `feature_percentiles` | Percentile distribution for a feature |
-| `significant_terms` | IPs/protocols overrepresented in attack traffic |
-| `counterfactual_analysis` | Find nearest normal flow + compute feature diffs |
-| `counterfactual_narrative` | Human-readable counterfactual explanation |
-| `explain_flow` | ES _explain API — why a flow matched a query |
-| `search_raw_packets` | Search individual packet records |
-| `find_similar_incidents` | kNN embedding search for historical matches |
-| `assess_severity` | Z-score severity assessment (low/medium/high) |
-
----
-
-## API Endpoints (when running `main.py serve`)
-
-| Method | Endpoint | Description |
-| ------ | -------- | ----------- |
-| GET | `/health` | Server + ES health |
-| POST | `/api/investigate` | Run full investigation (JSON response) |
-| WS | `/ws/investigate` | Stream investigation events in real time |
-| POST | `/api/detect` | Quick anomaly detection (no LLM) |
-| GET | `/api/flows` | List flows with filters |
-| GET | `/api/stats` | Feature statistics by label |
-| POST | `/api/counterfactual` | Run counterfactual for a flow |
-| GET | `/api/severity/{flow_id}` | Assess severity |
-| GET | `/api/similar/{flow_id}` | Find similar incidents |
-| GET | `/api/tools` | List available agent tools |
-
----
-
-## Project Structure
-
-```text
-IncidentLens/
-  main.py                # Unified CLI entry point
-  wrappers.py            # ES client + all index operations + graph building
-  agent_tools.py         # 13 tools with OpenAI function-calling schemas
-  agent.py               # LLM agent orchestrator (multi-step reasoning)
-  server.py              # FastAPI server (REST + WebSocket)
-  graph_data_wrapper.py  # Vectorised sliding-window graph builder
-  graph.py               # Core graph data structures
-  ingest_pipeline.py     # 8-step data ingestion + analysis pipeline
-  csv_to_json.py         # CSV to NDJSON converter
-  docker-compose.yml     # ES 8.12 + Kibana 8.12
-  requirements.txt       # Python dependencies
-  data/                  # NDJSON files (generated by csv_to_json.py)
-  EDA/                   # Exploratory data analysis notebooks
-```
-
----
-
-## ES Indices
-
-| Index | Contents |
-| ----- | -------- |
-| `incidentlens-flows` | Aggregated flow features (packet_count, total_bytes, mean_payload, mean_iat, std_iat, label) |
-| `incidentlens-embeddings` | Flow embedding vectors (dense_vector, cosine similarity, kNN-indexed) |
-| `incidentlens-counterfactuals` | Counterfactual diffs (per-feature original vs CF value, direction, pct_change) |
-| `incidentlens-packets` | Raw individual packet records |
-
----
+Built by **Aditya, Anuska, and Aayush** for the Elasticsearch Agent Builder Hackathon.
 
 ## License
 
-See [LICENSE](LICENSE).
+[MIT](LICENSE)
 
