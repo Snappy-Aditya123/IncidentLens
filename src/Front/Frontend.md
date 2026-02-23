@@ -107,7 +107,7 @@ A 4-step wizard with a progress bar and clickable step navigation. Uses 4 hooks 
 |:----------|:-----|:--------|
 | `Root` | `Root.tsx` | Layout shell — dark theme wrapper with `<Outlet>` |
 | `Dashboard` | `Dashboard.tsx` | Incident list page with stats and search |
-| `Investigation` | `Investigation.tsx` | 4-step wizard orchestrator with step state management |
+| `Investigation` | `Investigation.tsx` | 4-step wizard orchestrator with index-based step completion tracking |
 | `NotFound` | `NotFound.tsx` | 404 page |
 
 ### Investigation Step Components
@@ -115,7 +115,7 @@ A 4-step wizard with a progress bar and clickable step navigation. Uses 4 hooks 
 | Component | File | Props | Key Feature |
 |:----------|:-----|:------|:------------|
 | `ElasticsearchStep` | `investigation/ElasticsearchStep.tsx` | `data` (logs + query), `onNext` | ES query DSL viewer + log entry browser |
-| `GNNStep` | `investigation/GNNStep.tsx` | `data` (nodes + edges), `onNext` | D3 force-directed graph with drag interaction, risk assessment table |
+| `GNNStep` | `investigation/GNNStep.tsx` | `data` (nodes + edges), `onNext` | D3 force-directed graph with drag interaction, risk assessment table. Deep-clones data before passing to D3 to avoid mutating React props |
 | `CounterfactualStep` | `investigation/CounterfactualStep.tsx` | `data` (counterfactual) | Scenario comparison, parameter impact analysis, recommendations |
 
 ### Utility Components
@@ -241,7 +241,7 @@ interface InvestigationEvent { type: InvestigationEventType; content?: string; t
 | `investigate(query)` | `POST /api/investigate` | `{events: InvestigationEvent[]}` |
 | `investigateStream(query, signal?)` | `WS /ws/investigate` | `AsyncGenerator<InvestigationEvent>` |
 
-`investigateStream()` is a WebSocket **async generator** — use it with `for await...of`:
+`investigateStream()` is a WebSocket **async generator** — use it with `for await...of`. It includes JSON parse error handling, properly restores the `onerror` handler after connection succeeds, and closes the WebSocket after receiving a `\"done\"` event:
 
 ```typescript
 for await (const event of investigateStream("Why is 10.0.2.45 anomalous?")) {
@@ -253,18 +253,20 @@ for await (const event of investigateStream("Why is 10.0.2.45 anomalous?")) {
 
 ## React Hooks
 
-`app/hooks/useApi.ts` — Built on a generic `useAsync<T>` hook that manages `{ data, loading, error, refetch }` state. Each public hook wraps a specific API call:
+`app/hooks/useApi.ts` — Built on a generic `useAsync<T>` hook that manages `{ data, loading, error, refetch }` state. Uses a state-based tick counter (not a ref) to trigger refetches correctly. Each public hook wraps a specific API call:
 
 | Hook | Data Source | Fallback | Returns |
 |:-----|:-----------|:---------|:--------|
 | `useBackendHealth()` | `GET /health` | — | `BackendHealthResponse` |
 | `useIncidents()` | `POST /api/detect` → map to `Incident[]` | `mockIncidents` | `Incident[]` |
 | `useIncident(id)` | `POST /api/detect` → find by `_id` | `mockIncidents` lookup | `Incident \| null` |
-| `useElasticsearchData(id)` | `GET /api/flows` → build log view | `mockElasticsearchResults` | `ElasticsearchData \| null` |
-| `useNetworkGraph(id)` | `POST /api/detect` → `flowsToGraph()` | `mockNetworkGraph` | `NetworkGraphData \| null` |
+| `useElasticsearchData(id)` | `GET /api/incidents/{id}/logs` | `mockElasticsearchResults` | `ElasticsearchData \| null` |
+| `useNetworkGraph(id)` | `GET /api/incidents/{id}/graph` | `mockNetworkGraph` | `NetworkGraphData \| null` |
 | `useCounterfactual(id)` | `POST /api/counterfactual` → `backendCfToFrontend()` | `mockCounterfactuals` | `CounterfactualExplanation \| null` |
 | `useSeverity(flowId)` | `GET /api/severity/:id` | `null` | `BackendSeverityResponse \| null` |
 | `useInvestigationStream()` | `WS /ws/investigate` | — | `{events, running, error, start, stop}` |
+
+> **Cleanup:** `useInvestigationStream` aborts the WebSocket connection on component unmount via a `useEffect` cleanup function.
 
 **Mock fallback pattern:** Every data hook wraps its API call in `try/catch`. If the backend is unreachable, it falls back to the mock data in `data/mockData.ts`. This enables full offline UI development.
 
@@ -276,7 +278,7 @@ Three non-hook functions are also defined in `useApi.ts` for data transformation
 |:---------|:--------|
 | `flowToIncident(flow, index)` | Convert a `BackendFlow` to a frontend `Incident` |
 | `flowsToGraph(flows)` | Convert `BackendFlow[]` to `NetworkGraphData` (nodes + edges) |
-| `backendCfToFrontend(cf)` | Convert `BackendCounterfactualResponse` to `CounterfactualExplanation` |
+| `backendCfToFrontend(cf)` | Convert `BackendCounterfactualResponse` to `CounterfactualExplanation` (uses `\"N/A\"` fallback for missing values) |
 
 ---
 

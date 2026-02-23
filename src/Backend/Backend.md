@@ -10,16 +10,16 @@ Developer reference for the Python backend powering IncidentLens.
 |:-------|:---------------|
 | **main.py** | CLI shim — imports `main()` from `tests/testingentry.py` (ensures `src.Backend.*` path resolution) |
 | **tests/testingentry.py** | Actual CLI implementation — `health`, `ingest`, `investigate`, `serve`, `convert` |
-| **agent.py** | LLM agent orchestrator: multi-step reasoning loop with OpenAI tool-calling |
-| **agent_tools.py** | 15 tools exposed to the agent (ES queries, counterfactuals, severity, graph analysis). Includes `_STATS_CACHE` (30 s TTL), `_GRAPH_CACHE`, `set_graph_cache()`, and `_sanitize_for_json()` helper |
-| **server.py** | FastAPI server (v0.1.0) — REST endpoints, incident convenience API, WebSocket streaming. Also runnable directly via `python server.py` (`if __name__` block) |
-| **wrappers.py** | Singleton ES client, index management, bulk flow/embedding ingestion, kNN search, counterfactual diff, ML jobs |
+| **agent.py** | LLM agent orchestrator: multi-step reasoning loop with OpenAI tool-calling. After processing tool calls the loop continues automatically (no redundant `finish_reason` check) |
+| **agent_tools.py** | 15 tools exposed to the agent (ES queries, counterfactuals, severity, graph analysis). Includes `_STATS_CACHE` (30 s TTL), `_GRAPH_CACHE`, `set_graph_cache()`, and `_sanitize_for_json()` helper (handles `np.bool_`, `np.integer`, `np.floating`, NaN/Inf). Validates window indices with negative-value rejection |
+| **server.py** | FastAPI server (v0.1.0) — REST endpoints with proper HTTP error codes (502 for backend failures, 404 for missing resources), incident convenience API, WebSocket streaming. Also runnable directly via `python server.py` (`if __name__` block uses `src.Backend.server:app` import path) |
+| **wrappers.py** | Singleton ES client, index management, bulk flow/embedding ingestion, kNN search, counterfactual diff, ML jobs. `generate_embeddings()` auto-corrects `embedding_dim` to match actual GNN output dimensions |
 | **graph_data_wrapper.py** | Vectorised sliding-window graph builder — pure numpy, zero Python for-loops over packets |
 | **graph.py** | Core graph data structures (`node`, `network`), snapshot dataset builder |
 | **train.py** | EdgeGNN (GraphSAGE + Edge MLP) training pipeline with class-imbalance handling |
-| **temporal_gnn.py** | EvolveGCN-O — semi-temporal GNN with LSTM-evolved weights for sequence-level detection |
+| **temporal_gnn.py** | EvolveGCN-O — semi-temporal GNN with LSTM-evolved weights for sequence-level detection. `recompute_node_features()` initialises zero-valued features when edge_attr is insufficient (instead of returning `x=None`) |
 | **gnn_interface.py** | `BaseGNNEncoder` abstract class — the contract any GNN must satisfy to plug into the pipeline |
-| **ingest_pipeline.py** | 8-step data pipeline: load NDJSON → build graphs → index flows → embeddings → counterfactuals. Defines `RAW_PACKETS_INDEX` and `RAW_PACKETS_MAPPING` |
+| **ingest_pipeline.py** | 8-step data pipeline: load NDJSON → build graphs → index flows → embeddings → counterfactuals. Defines `RAW_PACKETS_INDEX` and `RAW_PACKETS_MAPPING`. Refreshes `incidentlens-*` indices (not `_all`) after indexing |
 | **csv_to_json.py** | Converts raw CSV datasets to chunked NDJSON for the ingest pipeline |
 | **GNN.py** | *Deprecated* — standalone EdgeGNN duplicate kept for reference only (canonical implementation: `train.py`). Safe to delete. |
 | **backup/** | `temporal_gnn_v1_backup.py` — earlier temporal GNN version kept for reference |
@@ -210,8 +210,10 @@ class CounterfactualRequest(BaseModel):
 | `GET` | `/api/tools` | List agent tools |
 | `GET` | `/api/incidents` | Anomalous flows as frontend `Incident` objects |
 | `GET` | `/api/incidents/{id}` | Single incident detail by flow ID |
-| `GET` | `/api/incidents/{id}/graph` | Network graph (nodes + edges) for D3 |
-| `GET` | `/api/incidents/{id}/logs` | ES-style log entries for the log viewer |
+| `GET` | `/api/incidents/{id}/graph` | Network graph scoped to incident IPs |
+| `GET` | `/api/incidents/{id}/logs` | ES-style log entries scoped to incident IPs |
+
+> **Error handling:** All REST endpoints check for `"error"` in the tool response and return HTTP 502 (backend error) or 404 (not found) instead of 200 with an error body.
 
 #### Frontend Incident Endpoints
 
@@ -227,8 +229,8 @@ _flow_to_incident(flow: dict) -> dict
 |:---------|:-------------|
 | `GET /api/incidents` | Calls `detect_anomalies` → maps each flow to `Incident` |
 | `GET /api/incidents/{id}` | Calls `get_flow` → maps to single `Incident` |
-| `GET /api/incidents/{id}/graph` | Calls `detect_anomalies` → builds `{nodes, edges}` for D3 force graph |
-| `GET /api/incidents/{id}/logs` | Calls `search_flows` → formats as `{totalHits, logs[], query}` |
+| `GET /api/incidents/{id}/graph` | Calls `get_flow` → scopes by incident IPs → calls `detect_anomalies` → builds `{nodes, edges}` for D3 force graph |
+| `GET /api/incidents/{id}/logs` | Calls `get_flow` → scopes by incident `src_ip` → calls `search_flows` → formats as `{totalHits, logs[], query}` |
 
 ### WebSocket
 

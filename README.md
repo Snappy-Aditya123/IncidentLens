@@ -256,8 +256,8 @@ IncidentLens/
 | `GET` | `/api/tools` | List all available agent tools |
 | `GET` | `/api/incidents` | Anomalous flows as frontend-ready Incident objects |
 | `GET` | `/api/incidents/{id}` | Single incident detail by flow ID |
-| `GET` | `/api/incidents/{id}/graph` | Network graph (nodes + edges) for D3 visualization |
-| `GET` | `/api/incidents/{id}/logs` | ES-style log entries for log viewer |
+| `GET` | `/api/incidents/{id}/graph` | Network graph (nodes + edges) scoped to incident IPs for D3 visualization |
+| `GET` | `/api/incidents/{id}/logs` | ES-style log entries scoped to incident IPs for log viewer |
 
 ### WebSocket
 
@@ -302,7 +302,7 @@ Event types: `thinking`, `tool_call`, `tool_result`, `conclusion`, `error`, `sta
 | `incidentlens-counterfactuals` | Counterfactual diffs — per-feature original vs CF value, direction, percent change |
 | `incidentlens-packets` | Raw individual packet records from the dataset |
 
-> Four 4th index (`incidentlens-packets`) is created and populated by `ingest_pipeline.py`. The mapping includes: `packet_index`, `timestamp`, `inter_arrival_time`, `src_ip`, `dst_ip`, `src_port`, `dst_port`, `protocol`, `ttl`, `ip_header_len`, `tcp_flags`, `udp_length`, `payload_length`, `packet_length`, `label`.
+> The 4th index (`incidentlens-packets`) is created and populated by `ingest_pipeline.py`. The mapping includes: `packet_index`, `timestamp`, `inter_arrival_time`, `src_ip`, `dst_ip`, `src_port`, `dst_port`, `protocol`, `ttl`, `ip_header_len`, `tcp_flags`, `udp_length`, `payload_length`, `packet_length`, `label`.
 
 ---
 
@@ -313,7 +313,7 @@ Event types: `thinking`, `tool_call`, `tool_result`, `conclusion`, `error`, `sta
 - **Pre-processed GNN bottleneck removal** — Self-loops and degree normalization cached at data-prep time; LSTM weight evolution flattened from O(hidden_dim) batches to O(1).
 - **Singleton ES client** with retry logic, bulk indexing with batch MD5 flow-ID generation, and pre-converted numpy→Python type coercion for minimal per-document overhead.
 - **166 tests** covering graph construction, GNN forward/backward passes, temporal sequences, normalization, and edge-case handling — all passing.
-- **Full-stack integration** — Typed API service layer (`services/api.ts`) with 9 typed fetch functions, WebSocket async-generator streaming client, and 8 React hooks (`useBackendHealth`, `useIncidents`, `useIncident`, `useElasticsearchData`, `useNetworkGraph`, `useCounterfactual`, `useSeverity`, `useInvestigationStream`) that try the live backend first and fall back to mock data for offline development.
+- **Full-stack integration** — Typed API service layer (`services/api.ts`) with 9 typed fetch functions, WebSocket async-generator streaming client, and 8 React hooks (`useBackendHealth`, `useIncidents`, `useIncident`, `useElasticsearchData`, `useNetworkGraph`, `useCounterfactual`, `useSeverity`, `useInvestigationStream`) that try the live backend first and fall back to mock data for offline development. Incident-scoped hooks (`useElasticsearchData`, `useNetworkGraph`) call the `/api/incidents/{id}/logs` and `/api/incidents/{id}/graph` endpoints directly for per-incident data.
 - **Zero-config dev proxy** — Vite dev server on `:5173` proxies `/api` and `/ws` to the FastAPI backend on `:8000`, so frontend and backend can be developed and run simultaneously with no CORS issues.
 
 ---
