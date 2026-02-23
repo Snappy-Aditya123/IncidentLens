@@ -45,7 +45,7 @@ The agent doesn't just say "this is malicious" — it says *"this flow has 47x t
 - **Dual GNN Architecture** — EdgeGNN (GraphSAGE + Edge MLP) for static classification and EvolveGCN-O (LSTM-evolved weights) for capturing temporal attack patterns
 - **Counterfactual Analysis** — Feature-level diffs ("what would need to change?") and graph-level edge perturbation ("which connections drive the anomaly?")
 - **Real-Time WebSocket Streaming** — Every thinking step, tool call, and conclusion is streamed to the frontend as it happens
-- **Interactive Investigation Dashboard** — React + D3.js frontend with a 4-step guided wizard (Overview → ES Logs → Network Graph → Counterfactual Explainability), shadcn/ui components, and Tailwind v4 dark theme
+- **Interactive Investigation Dashboard** — React 19 + Vite 6 frontend with a 4-step guided wizard (Overview → ES Logs → Network Graph → Counterfactual Explainability), shadcn/ui components, Tailwind v4 dark theme, and typed API hooks that fall back to mock data when the backend is offline
 - **Kitsune Dataset Validated** — Tested on 4M+ real SSDP flood attack packets with ground-truth labels
 
 ---
@@ -159,6 +159,16 @@ python src/Backend/main.py investigate "why is 192.168.100.5 anomalous?"
 python src/Backend/main.py serve --port 8000
 ```
 
+### 7. Start the Frontend
+
+```bash
+cd src/Front
+npm install
+npm run dev          # → http://localhost:5173
+```
+
+The Vite dev server proxies `/api` and `/ws` requests to the backend at `localhost:8000`, so both servers can run simultaneously in development. In production, build the frontend with `npm run build` and serve the `dist/` output alongside the API.
+
 ---
 
 ## Project Structure
@@ -170,7 +180,7 @@ IncidentLens/
 │   │   ├── main.py                     # Unified CLI entry point
 │   │   ├── agent.py                    # LLM agent — multi-step reasoning loop
 │   │   ├── agent_tools.py              # 15 tools with OpenAI function-calling schemas
-│   │   ├── server.py                   # FastAPI server (REST + WebSocket)
+│   │   ├── server.py                   # FastAPI server (REST + WebSocket + Incident API)
 │   │   ├── wrappers.py                 # ES client, indexing, kNN, counterfactuals
 │   │   ├── graph_data_wrapper.py       # Vectorised sliding-window graph builder
 │   │   ├── graph.py                    # Core graph data structures
@@ -181,18 +191,26 @@ IncidentLens/
 │   │   ├── csv_to_json.py              # CSV → NDJSON converter
 │   │   └── tests/                      # 166 tests (100% pass)
 │   ├── Front/                          # React frontend
+│   │   ├── package.json                 # Dependencies + scripts (dev, build, preview)
+│   │   ├── vite.config.ts               # Vite 6 + proxy (/api → :8000, /ws → :8000)
+│   │   ├── tsconfig.json                # Strict TS config + @/ alias
+│   │   ├── index.html                   # HTML entry point
 │   │   ├── app/
-│   │   │   ├── App.tsx                  # Root — RouterProvider + Toaster
+│   │   │   ├── main.tsx                 # React 19 root mount
+│   │   │   ├── App.tsx                  # RouterProvider + Toaster
 │   │   │   ├── routes.tsx               # Route definitions
+│   │   │   ├── types.ts                 # Shared UI + backend response types
+│   │   │   ├── services/api.ts          # Typed fetch client + WebSocket stream
+│   │   │   ├── hooks/useApi.ts          # 7 hooks — live API with mock fallback
 │   │   │   ├── components/
-│   │   │   │   ├── Dashboard.tsx         # Incident list + stats
-│   │   │   │   ├── Investigation.tsx     # 4-step wizard orchestrator
+│   │   │   │   ├── Dashboard.tsx         # Incident list + stats (live data)
+│   │   │   │   ├── Investigation.tsx     # 4-step wizard (live data)
 │   │   │   │   ├── investigation/
 │   │   │   │   │   ├── ElasticsearchStep.tsx  # ES log analysis
 │   │   │   │   │   ├── GNNStep.tsx            # D3 network graph
 │   │   │   │   │   └── CounterfactualStep.tsx # Explainability
 │   │   │   │   └── ui/                  # 48 shadcn/ui primitives
-│   │   │   └── data/mockData.ts         # TypeScript types + mock data
+│   │   │   └── data/mockData.ts         # Mock data for offline fallback
 │   │   └── styles/                      # Tailwind v4 + oklch theme tokens
 │   └── docker-compose.yml               # ES 8.12 + Kibana 8.12
 ├── data/                                # NDJSON data files
@@ -218,6 +236,10 @@ IncidentLens/
 | `GET` | `/api/severity/{flow_id}` | Assess anomaly severity (low / medium / high) |
 | `GET` | `/api/similar/{flow_id}` | Find similar historical incidents via kNN |
 | `GET` | `/api/tools` | List all available agent tools |
+| `GET` | `/api/incidents` | Anomalous flows as frontend-ready Incident objects |
+| `GET` | `/api/incidents/{id}` | Single incident detail by flow ID |
+| `GET` | `/api/incidents/{id}/graph` | Network graph (nodes + edges) for D3 visualization |
+| `GET` | `/api/incidents/{id}/logs` | ES-style log entries for log viewer |
 
 ### WebSocket
 
@@ -271,6 +293,8 @@ Event types: `thinking`, `tool_call`, `tool_result`, `conclusion`, `error`, `sta
 - **Pre-processed GNN bottleneck removal** — Self-loops and degree normalization cached at data-prep time; LSTM weight evolution flattened from O(hidden_dim) batches to O(1).
 - **Singleton ES client** with retry logic, bulk indexing with batch MD5 flow-ID generation, and pre-converted numpy→Python type coercion for minimal per-document overhead.
 - **166 tests** covering graph construction, GNN forward/backward passes, temporal sequences, normalization, and edge-case handling — all passing.
+- **Full-stack integration** — Typed API service layer (`services/api.ts`) with 10+ typed fetch functions, WebSocket async-generator streaming client, and 7 React hooks (`useIncidents`, `useIncident`, `useElasticsearchData`, `useNetworkGraph`, `useCounterfactual`, `useSeverity`, `useInvestigationStream`) that try the live backend first and fall back to mock data for offline development.
+- **Zero-config dev proxy** — Vite dev server on `:5173` proxies `/api` and `/ws` to the FastAPI backend on `:8000`, so frontend and backend can be developed and run simultaneously with no CORS issues.
 
 ---
 

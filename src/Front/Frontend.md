@@ -1,6 +1,6 @@
 # IncidentLens — Frontend
 
-Interactive investigation dashboard built with React, Tailwind CSS v4, shadcn/ui, and D3.js.
+Interactive investigation dashboard built with React 19, TypeScript, Vite 6, Tailwind CSS v4, shadcn/ui, and D3.js — fully integrated with the FastAPI backend via a typed API service layer and React hooks.
 
 ---
 
@@ -17,6 +17,8 @@ The frontend provides a **guided 4-step investigation workflow** that walks anal
 
 Each step surfaces progressively deeper insight — from raw logs to graph-level anomaly scores to *"what would need to change for this to be normal."*
 
+Data is fetched from the live FastAPI backend via typed hooks. If the backend is unreachable (e.g., during UI-only development), every hook falls back to mock data automatically — no code changes needed.
+
 ---
 
 ## Stack
@@ -24,13 +26,35 @@ Each step surfaces progressively deeper insight — from raw logs to graph-level
 | Layer | Technology |
 |:------|:-----------|
 | **Framework** | React 19 + TypeScript |
+| **Build** | Vite 6 with `@vitejs/plugin-react` + `@tailwindcss/vite` |
 | **Routing** | React Router v7 (nested routes, `<Outlet>`) |
 | **Styling** | Tailwind CSS v4 (oklch design tokens, `@source` directive) |
 | **Components** | shadcn/ui (Card, Badge, Button, Tabs, Progress, etc.) |
 | **Visualization** | D3.js force-directed graph (interactive, drag-enabled) |
+| **API layer** | Typed fetch client (`services/api.ts`) + WebSocket async-generator |
+| **State** | React hooks (`hooks/useApi.ts`) — live backend with mock fallback |
 | **Icons** | lucide-react |
 | **Date formatting** | date-fns |
 | **Animations** | tw-animate-css |
+
+---
+
+## Quick Start
+
+```bash
+cd src/Front
+npm install
+npm run dev          # → http://localhost:5173
+```
+
+The Vite dev server proxies `/api` and `/ws` to `http://localhost:8000` (the FastAPI backend). Both servers can run simultaneously.
+
+| Script | Command | Description |
+|:-------|:--------|:------------|
+| dev | `npm run dev` | Start Vite dev server with HMR on `:5173` |
+| build | `npm run build` | Type-check + production build → `dist/` |
+| preview | `npm run preview` | Preview the production build locally |
+| lint | `npm run lint` | Run ESLint |
 
 ---
 
@@ -48,15 +72,18 @@ Each step surfaces progressively deeper insight — from raw logs to graph-level
 
 ### Dashboard (`/`)
 
-The entry point analysts see. Displays:
+The entry point analysts see. Uses `useIncidents()` to fetch anomalous flows from the backend. Displays:
 
 - **Stats grid** — 4 cards: Active Incidents, Critical Alerts, Avg Anomaly Score, Total Incidents (computed from incident data)
 - **Search bar** — real-time client-side filtering by title or ID
+- **Loading state** — `<Skeleton>` placeholders while data loads
+- **Error banner** — `<AlertTriangle>` error display with a retry button
 - **Incident cards** — each shows severity badge, status, description, affected systems, anomaly score percentage, and an **"Investigate"** CTA that routes to the investigation wizard
+- **Refresh button** — `<RefreshCw>` spinner for manual data re-fetch
 
 ### Investigation (`/investigation/:incidentId`)
 
-A 4-step wizard with a progress bar and clickable step navigation:
+A 4-step wizard with a progress bar and clickable step navigation. Uses 4 hooks (`useIncident`, `useElasticsearchData`, `useNetworkGraph`, `useCounterfactual`) to fetch live data per step with loading spinners and empty-state handling:
 
 | Step | Component | What It Shows |
 |:-----|:----------|:--------------|
@@ -97,14 +124,16 @@ A 4-step wizard with a progress bar and clickable step navigation:
 
 ## Data Types
 
-Defined in `app/data/mockData.ts`:
+Shared types are defined in `app/types.ts` and split into two groups:
+
+### Frontend UI Types
 
 ```typescript
 interface Incident {
   id: string;
   title: string;
   severity: 'critical' | 'high' | 'medium' | 'low';
-  status: 'active' | 'investigating' | 'resolved' | 'monitoring';
+  status: 'investigating' | 'resolved' | 'escalated';
   description: string;
   timestamp: string;
   affectedSystems: string[];
@@ -122,21 +151,91 @@ interface NetworkNode {
 interface NetworkEdge {
   source: string;
   target: string;
+  type: 'connection' | 'data_flow' | 'dependency';
   weight: number;
   anomalous: boolean;
 }
 
 interface CounterfactualExplanation {
-  original: { prediction: string; confidence: number };
-  counterfactual: { prediction: string; confidence: number };
+  original: string;
+  counterfactual: string;
   changes: Array<{
     parameter: string;
     original: string;
     modified: string;
     impact: number;
   }>;
+  prediction: { original: string; counterfactual: string };
 }
 ```
+
+### Backend Response Types
+
+```typescript
+interface BackendFlow {
+  _id: string;
+  src_ip: string;   dst_ip: string;
+  label: number;
+  packet_count?: number;  total_bytes?: number;
+  mean_payload?: number;  mean_iat?: number;  std_iat?: number;
+  prediction?: number;    prediction_score?: number;
+}
+
+interface BackendDetectResponse { method: string; count: number; flows: BackendFlow[]; }
+interface BackendFlowsResponse  { count: number; flows: BackendFlow[]; }
+interface BackendCounterfactualResponse { flow_id: string; diffs: Array<{feature: string; anomalous_value: number; normal_value: number; abs_diff: number; direction: string}>; }
+interface BackendSeverityResponse { flow_id: string; severity: string; z_scores: Record<string, number>; max_z: number; }
+interface BackendHealthResponse  { server: string; elasticsearch: string; }
+
+// WebSocket events
+type InvestigationEventType = 'thinking' | 'tool_call' | 'tool_result' | 'conclusion' | 'error' | 'done';
+interface InvestigationEvent { type: InvestigationEventType; content?: string; tool?: string; arguments?: Record<string, unknown>; result?: string; }
+```
+
+---
+
+## API Service Layer
+
+`app/services/api.ts` — A typed fetch client with every backend endpoint:
+
+| Function | Endpoint | Return Type |
+|:---------|:---------|:------------|
+| `checkHealth()` | `GET /health` | `BackendHealthResponse` |
+| `listFlows(params?)` | `GET /api/flows` | `BackendFlowsResponse` |
+| `detectAnomalies(params?)` | `POST /api/detect` | `BackendDetectResponse` |
+| `getFlowSeverity(flowId)` | `GET /api/severity/:id` | `BackendSeverityResponse` |
+| `getFlowCounterfactual(flowId)` | `POST /api/counterfactual` | `BackendCounterfactualResponse` |
+| `getSimilarIncidents(flowId, k?)` | `GET /api/similar/:id` | `{flow_id, similar}` |
+| `getFeatureStats()` | `GET /api/stats` | `Record<string, unknown>` |
+| `investigate(query)` | `POST /api/investigate` | `{events: InvestigationEvent[]}` |
+| `investigateStream(query, signal?)` | `WS /ws/investigate` | `AsyncGenerator<InvestigationEvent>` |
+
+`investigateStream()` is a WebSocket **async generator** — use it with `for await...of`:
+
+```typescript
+for await (const event of investigateStream("Why is 10.0.2.45 anomalous?")) {
+  console.log(event.type, event.content);
+}
+```
+
+---
+
+## React Hooks
+
+`app/hooks/useApi.ts` — Built on a generic `useAsync<T>` hook. Each returns `{ data, loading, error, refetch }`.
+
+| Hook | Data Source | Fallback | Returns |
+|:-----|:-----------|:---------|:--------|
+| `useBackendHealth()` | `GET /health` | — | `BackendHealthResponse` |
+| `useIncidents()` | `POST /api/detect` → map to `Incident[]` | `mockIncidents` | `Incident[]` |
+| `useIncident(id)` | `POST /api/detect` → find by `_id` | `mockIncidents` lookup | `Incident \| null` |
+| `useElasticsearchData(id)` | `GET /api/flows` → build log view | `mockElasticsearchResults` | `ElasticsearchData \| null` |
+| `useNetworkGraph(id)` | `POST /api/detect` → `flowsToGraph()` | `mockNetworkGraph` | `NetworkGraphData \| null` |
+| `useCounterfactual(id)` | `POST /api/counterfactual` → `backendCfToFrontend()` | `mockCounterfactuals` | `CounterfactualExplanation \| null` |
+| `useSeverity(flowId)` | `GET /api/severity/:id` | `null` | `BackendSeverityResponse \| null` |
+| `useInvestigationStream()` | `WS /ws/investigate` | — | `{events, running, error, start, stop}` |
+
+**Mock fallback pattern:** Every data hook wraps its API call in `try/catch`. If the backend is unreachable, it falls back to the mock data in `data/mockData.ts`. This enables full offline UI development.
 
 ---
 
@@ -161,14 +260,25 @@ styles/
 ```
 src/Front/
 ├── Frontend.md                          # This file
+├── package.json                         # Deps + scripts (dev, build, preview, lint)
+├── vite.config.ts                       # Vite 6 — React + Tailwind plugins, proxy config
+├── tsconfig.json                        # Strict TS, @/ → app/ alias
+├── index.html                           # HTML entry point (dark class on root)
+├── vite-env.d.ts                        # Vite type references
 ├── __init__.py
 ├── app/
-│   ├── App.tsx                          # Root — RouterProvider + Toaster
+│   ├── main.tsx                         # React 19 createRoot mount
+│   ├── App.tsx                          # RouterProvider + Toaster
 │   ├── routes.tsx                       # Route definitions
+│   ├── types.ts                         # Shared UI + backend response types
+│   ├── services/
+│   │   └── api.ts                       # Typed fetch client + WebSocket stream
+│   ├── hooks/
+│   │   └── useApi.ts                    # 7 hooks — live API with mock fallback
 │   ├── components/
 │   │   ├── Root.tsx                     # Layout shell (dark bg + Outlet)
-│   │   ├── Dashboard.tsx                # Incident list + stats
-│   │   ├── Investigation.tsx            # 4-step wizard orchestrator
+│   │   ├── Dashboard.tsx                # Incident list + stats (useIncidents)
+│   │   ├── Investigation.tsx            # 4-step wizard (4 hooks, per-step loading)
 │   │   ├── NotFound.tsx                 # 404 page
 │   │   ├── investigation/
 │   │   │   ├── ElasticsearchStep.tsx    # ES log analysis step
@@ -178,7 +288,7 @@ src/Front/
 │   │   │   └── ImageWithFallback.tsx    # Image with error fallback
 │   │   └── ui/                          # 48 shadcn/ui primitives
 │   └── data/
-│       └── mockData.ts                  # Type definitions + mock data
+│       └── mockData.ts                  # Mock data for offline fallback
 └── styles/
     ├── index.css                        # Entry point
     ├── fonts.css                        # Font declarations
@@ -188,15 +298,34 @@ src/Front/
 
 ---
 
+## Build & Proxy Architecture
+
+```
+Browser (:5173)                    Vite Dev Server                    FastAPI (:8000)
+    │                                   │                                  │
+    │  GET /api/incidents  ──────────▶  │  proxy /api/* ─────────────────▶ │
+    │                                   │                                  │
+    │  WS /ws/investigate  ──────────▶  │  proxy /ws/* (ws: true) ──────▶ │
+    │                                   │                                  │
+    │  GET /health  ─────────────────▶  │  proxy /health ───────────────▶ │
+    │                                   │                                  │
+    │  GET / (React app)  ───────────▶  │  serves index.html + HMR        │
+```
+
+**Development:** Run both `npm run dev` (frontend on `:5173`) and `python src/Backend/main.py serve` (backend on `:8000`). The Vite proxy forwards all API requests transparently.
+
+**Production:** `npm run build` outputs a static `dist/` directory. Serve it from the FastAPI server or any static host; update API URLs accordingly.
+
+---
+
 ## Connecting to the Backend
 
-The frontend currently uses static mock data. To connect to the live backend API:
+The frontend is **already connected** to the backend. All data flows through the hooks in `hooks/useApi.ts`:
 
 1. **Start the backend:** `python src/Backend/main.py serve --port 8000`
-2. **Replace mock data** in Dashboard/Investigation with `fetch()` calls to:
-   - `GET /api/flows` — populate incident list
-   - `POST /api/investigate` — trigger investigation
-   - `WS /ws/investigate` — stream real-time investigation events
-   - `GET /api/stats` — feature statistics
-   - `POST /api/counterfactual` — counterfactual analysis
-3. **WebSocket integration** — connect to `ws://localhost:8000/ws/investigate` to receive streaming `thinking`, `tool_call`, `tool_result`, and `conclusion` events to drive the step progression in real time
+2. **Start the frontend:** `cd src/Front && npm run dev`
+3. Dashboard calls `useIncidents()` → `POST /api/detect` → maps flows to `Incident[]`
+4. Investigation uses `useIncident`, `useElasticsearchData`, `useNetworkGraph`, `useCounterfactual`
+5. WebSocket streaming: `useInvestigationStream()` → `WS /ws/investigate`
+
+If the backend is offline, all hooks silently fall back to mock data — no errors in the UI.

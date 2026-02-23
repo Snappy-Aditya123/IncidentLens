@@ -11,7 +11,7 @@ Developer reference for the Python backend powering IncidentLens.
 | **main.py** | Unified CLI — `health`, `ingest`, `investigate`, `serve`, `convert` |
 | **agent.py** | LLM agent orchestrator: multi-step reasoning loop with OpenAI tool-calling |
 | **agent_tools.py** | 15 tools exposed to the agent (ES queries, counterfactuals, severity, graph analysis) |
-| **server.py** | FastAPI server — REST endpoints + WebSocket streaming for real-time investigation |
+| **server.py** | FastAPI server — REST endpoints, incident convenience API, WebSocket streaming |
 | **wrappers.py** | Singleton ES client, index management, bulk flow/embedding ingestion, kNN search, counterfactual diff, ML jobs |
 | **graph_data_wrapper.py** | Vectorised sliding-window graph builder — pure numpy, zero Python for-loops over packets |
 | **graph.py** | Core graph data structures (`node`, `network`), snapshot dataset builder |
@@ -145,6 +145,27 @@ Start with `python src/Backend/main.py serve --port 8000`.
 | `GET` | `/api/severity/{flow_id}` | Severity assessment |
 | `GET` | `/api/similar/{flow_id}` | kNN similar incidents |
 | `GET` | `/api/tools` | List agent tools |
+| `GET` | `/api/incidents` | Anomalous flows as frontend `Incident` objects |
+| `GET` | `/api/incidents/{id}` | Single incident detail by flow ID |
+| `GET` | `/api/incidents/{id}/graph` | Network graph (nodes + edges) for D3 |
+| `GET` | `/api/incidents/{id}/logs` | ES-style log entries for the log viewer |
+
+#### Frontend Incident Endpoints
+
+The `/api/incidents*` endpoints are convenience wrappers that reshape raw ES flow data into the `Incident` shape consumed by the React frontend. They use a shared `_flow_to_incident()` helper:
+
+```python
+# Maps: raw ES flow dict → {id, title, severity, status, timestamp,
+#        affectedSystems, description, anomalyScore}
+_flow_to_incident(flow: dict) -> dict
+```
+
+| Endpoint | What it does |
+|:---------|:-------------|
+| `GET /api/incidents` | Calls `detect_anomalies` → maps each flow to `Incident` |
+| `GET /api/incidents/{id}` | Calls `get_flow` → maps to single `Incident` |
+| `GET /api/incidents/{id}/graph` | Calls `detect_anomalies` → builds `{nodes, edges}` for D3 force graph |
+| `GET /api/incidents/{id}/logs` | Calls `search_flows` → formats as `{totalHits, logs[], query}` |
 
 ### WebSocket
 
