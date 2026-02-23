@@ -32,7 +32,7 @@ from torch_geometric.data import Data
 from torch_geometric.utils import add_self_loops, degree
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from temporal_gnn import (
+from src.Backend.temporal_gnn import (
     EvolvingGCNLayer,
     EvolvingGNN,
     apply_normalization,
@@ -789,7 +789,7 @@ class TestPrepareDatasetSmoke(unittest.TestCase):
     def test_prepare_from_dataframe(self):
         """End-to-end prepare_temporal_dataset with mock data."""
         import pandas as pd
-        from temporal_gnn import prepare_temporal_dataset
+        from src.Backend.temporal_gnn import prepare_temporal_dataset
 
         df = self._make_mock_packets_df(200)
 
@@ -819,7 +819,7 @@ class TestPrepareDatasetSmoke(unittest.TestCase):
     def test_prepare_no_normalize(self):
         """prepare_temporal_dataset with normalize=False should skip normalization."""
         import pandas as pd
-        from temporal_gnn import prepare_temporal_dataset
+        from src.Backend.temporal_gnn import prepare_temporal_dataset
 
         df = self._make_mock_packets_df(150)
 
@@ -837,7 +837,7 @@ class TestPrepareDatasetSmoke(unittest.TestCase):
     def test_prepare_with_separate_labels_df(self):
         """Labels provided as a separate DataFrame."""
         import pandas as pd
-        from temporal_gnn import prepare_temporal_dataset
+        from src.Backend.temporal_gnn import prepare_temporal_dataset
 
         n = 100
         packets_df = self._make_mock_packets_df(n)

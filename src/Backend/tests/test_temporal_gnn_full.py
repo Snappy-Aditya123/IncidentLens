@@ -16,7 +16,7 @@ import numpy as np
 from torch_geometric.data import Data
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from temporal_gnn import (
+from src.Backend.temporal_gnn import (
     EvolvingGNN,
     EvolvingGCNLayer,
     preprocess_graph,

@@ -17,8 +17,8 @@ from torch_geometric.data import Data
 # ──────────────────────────────────────────────
 # Imports from the project
 # ──────────────────────────────────────────────
-from gnn_interface import BaseGNNEncoder, create_dataloaders, compute_class_weights
-from graph_data_wrapper import (
+from src.Backend.gnn_interface import BaseGNNEncoder, create_dataloaders, compute_class_weights
+from src.Backend.graph_data_wrapper import (
     build_sliding_window_graphs,
     _aggregate_flows_numpy,
     _assign_window_ids,
@@ -29,7 +29,7 @@ from graph_data_wrapper import (
     find_most_anomalous_window,
     find_most_normal_window,
 )
-from graph import network, node, build_sample_graph, build_snapshot_dataset
+from src.Backend.graph import network, node, build_sample_graph, build_snapshot_dataset
 
 
 # ═══════════════════════════════════════════════

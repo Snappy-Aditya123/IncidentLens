@@ -24,7 +24,7 @@ from typing import Any, AsyncIterator, Iterator
 
 from openai import OpenAI
 
-import agent_tools
+import src.Backend.agent_tools as agent_tools
 
 logger = logging.getLogger(__name__)
 

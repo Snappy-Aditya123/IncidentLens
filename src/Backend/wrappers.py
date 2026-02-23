@@ -36,7 +36,7 @@ from elasticsearch.exceptions import (
 from torch_geometric.data import Data
 
 # graph_data_wrapper — the vectorised graph builder
-from graph_data_wrapper import (
+from src.Backend.graph_data_wrapper import (
     build_sliding_window_graphs as _gdw_build_graphs,
     analyze_graphs as _gdw_analyze,
     load_graph_dataset as _gdw_load_dataset,
@@ -47,7 +47,7 @@ from graph_data_wrapper import (
 )
 
 # GNN integration (lazy import — works even if no model is registered)
-from gnn_interface import BaseGNNEncoder
+from src.Backend.gnn_interface import BaseGNNEncoder
 
 logger = logging.getLogger(__name__)
 

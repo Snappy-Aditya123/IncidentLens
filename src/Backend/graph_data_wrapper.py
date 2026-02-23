@@ -2,7 +2,7 @@ import pandas as pd
 import torch
 import numpy as np
 from torch_geometric.data import Data
-from graph import network, node, build_snapshot_dataset
+from src.Backend.graph import network, node, build_snapshot_dataset
 
 
 # ===============================

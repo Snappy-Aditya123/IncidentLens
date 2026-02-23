@@ -35,9 +35,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-import wrappers
-import agent_tools
-from agent import IncidentAgent, AgentConfig
+import src.Backend.wrappers as wrappers
+import src.Backend.agent_tools as agent_tools
+from src.Backend.agent import IncidentAgent, AgentConfig
 
 logger = logging.getLogger(__name__)
 
