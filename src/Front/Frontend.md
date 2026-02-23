@@ -118,7 +118,9 @@ A 4-step wizard with a progress bar and clickable step navigation. Uses 4 hooks 
 | Component | File | Purpose |
 |:----------|:-----|:--------|
 | `ImageWithFallback` | `figma/ImageWithFallback.tsx` | `<img>` with graceful error state (gray placeholder SVG) |
-| 48 shadcn/ui primitives | `ui/*.tsx` | Accordion, Badge, Button, Card, Dialog, Tabs, Table, Tooltip, etc. |
+| 46 shadcn/ui components | `ui/*.tsx` | Accordion, Badge, Button, Card, Dialog, Tabs, Table, Tooltip, etc. |
+| `utils.ts` | `ui/utils.ts` | `cn()` helper — merges Tailwind classes via `clsx` + `tailwind-merge` |
+| `use-mobile.ts` | `ui/use-mobile.ts` | Responsive hook — detects mobile viewport via `matchMedia` |
 
 ---
 
@@ -156,6 +158,17 @@ interface NetworkEdge {
   anomalous: boolean;
 }
 
+interface ElasticsearchData {
+  totalHits: number;
+  logs: Array<{ timestamp: string; source: string; message: string; level: string }>;
+  query: unknown;
+}
+
+interface NetworkGraphData {
+  nodes: NetworkNode[];
+  edges: NetworkEdge[];
+}
+
 interface CounterfactualExplanation {
   original: string;
   counterfactual: string;
@@ -183,11 +196,11 @@ interface BackendFlow {
 
 interface BackendDetectResponse { method: string; count: number; flows: BackendFlow[]; }
 interface BackendFlowsResponse  { count: number; flows: BackendFlow[]; }
-interface BackendCounterfactualResponse { flow_id: string; diffs: Array<{feature: string; anomalous_value: number; normal_value: number; abs_diff: number; direction: string}>; }
+interface BackendCounterfactualResponse { flow_id: string; anomalous_flow: Record<string, unknown>; nearest_normal: Record<string, unknown>; diffs: Array<{feature: string; anomalous_value: number; normal_value: number; abs_diff: number; direction: string}>; }
 interface BackendSeverityResponse { flow_id: string; severity: string; z_scores: Record<string, number>; max_z: number; }
-interface BackendHealthResponse  { server: string; elasticsearch: string; }
+interface BackendHealthResponse  { server: string; elasticsearch: string; indices?: Record<string, boolean>; error?: string; }
 
-// WebSocket events
+// WebSocket events (backend also emits 'status' — frontend silently ignores it)
 type InvestigationEventType = 'thinking' | 'tool_call' | 'tool_result' | 'conclusion' | 'error' | 'done';
 interface InvestigationEvent { type: InvestigationEventType; content?: string; tool?: string; arguments?: Record<string, unknown>; result?: string; }
 ```
@@ -274,7 +287,7 @@ src/Front/
 │   ├── services/
 │   │   └── api.ts                       # Typed fetch client + WebSocket stream
 │   ├── hooks/
-│   │   └── useApi.ts                    # 7 hooks — live API with mock fallback
+│   │   └── useApi.ts                    # 8 hooks — live API with mock fallback
 │   ├── components/
 │   │   ├── Root.tsx                     # Layout shell (dark bg + Outlet)
 │   │   ├── Dashboard.tsx                # Incident list + stats (useIncidents)
@@ -286,7 +299,7 @@ src/Front/
 │   │   │   └── CounterfactualStep.tsx   # Counterfactual explanation step
 │   │   ├── figma/
 │   │   │   └── ImageWithFallback.tsx    # Image with error fallback
-│   │   └── ui/                          # 48 shadcn/ui primitives
+│   │   └── ui/                          # 46 shadcn/ui components + utils.ts, use-mobile.ts
 │   └── data/
 │       └── mockData.ts                  # Mock data for offline fallback
 └── styles/

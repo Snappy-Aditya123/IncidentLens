@@ -8,7 +8,8 @@ Developer reference for the Python backend powering IncidentLens.
 
 | Module | Responsibility |
 |:-------|:---------------|
-| **main.py** | Unified CLI — `health`, `ingest`, `investigate`, `serve`, `convert` |
+| **main.py** | CLI shim — imports `main()` from `tests/testingentry.py` (ensures `src.Backend.*` path resolution) |
+| **tests/testingentry.py** | Actual CLI implementation — `health`, `ingest`, `investigate`, `serve`, `convert` |
 | **agent.py** | LLM agent orchestrator: multi-step reasoning loop with OpenAI tool-calling |
 | **agent_tools.py** | 15 tools exposed to the agent (ES queries, counterfactuals, severity, graph analysis) |
 | **server.py** | FastAPI server — REST endpoints, incident convenience API, WebSocket streaming |
@@ -20,6 +21,7 @@ Developer reference for the Python backend powering IncidentLens.
 | **gnn_interface.py** | `BaseGNNEncoder` abstract class — the contract any GNN must satisfy to plug into the pipeline |
 | **ingest_pipeline.py** | 8-step data pipeline: load NDJSON → build graphs → index flows → embeddings → counterfactuals |
 | **csv_to_json.py** | Converts raw CSV datasets to chunked NDJSON for the ingest pipeline |
+| **GNN.py** | *Deprecated* — standalone EdgeGNN duplicate kept for reference (canonical: `train.py`) |
 
 ---
 
@@ -84,11 +86,13 @@ Aggregated flow features per edge per time window.
 | `window_id` | integer | Time window index |
 | `window_start` | float | Window start timestamp |
 | `src_ip` / `dst_ip` | ip | Source and destination addresses |
+| `protocol` | keyword | Network protocol |
 | `packet_count` | float | Number of packets in the flow |
 | `total_bytes` | float | Sum of packet sizes |
 | `mean_payload` / `mean_iat` / `std_iat` | float | Payload and inter-arrival-time stats |
 | `label` | integer | Ground truth (0/1) |
 | `prediction` / `prediction_score` | integer/float | GNN model output |
+| `timestamp` | date | Index timestamp (epoch_millis or ISO) |
 
 ### incidentlens-embeddings
 
@@ -106,11 +110,15 @@ Feature-level diffs explaining each anomaly.
 
 | Field | Type | Description |
 |:------|:-----|:------------|
+| `cf_id` | keyword | Unique counterfactual document ID |
 | `flow_id` | keyword | The anomalous flow |
 | `nearest_normal_id` | keyword | Closest normal flow via kNN |
+| `prediction` / `cf_prediction` | keyword | Original and counterfactual predictions |
 | `similarity_score` | float | Cosine similarity score |
 | `feature_diffs` | nested | Per-feature: original_value, cf_value, abs_diff, pct_change, direction |
 | `edges_removed` | nested | Graph-level: which edges were removed in the perturbation |
+| `explanation_text` | text | Human-readable explanation narrative |
+| `timestamp` | date | Index timestamp (epoch_millis or ISO) |
 
 ---
 
@@ -172,12 +180,15 @@ _flow_to_incident(flow: dict) -> dict
 **`WS /ws/investigate`** — Connect and send `{"query": "..."}`. Server streams JSON events:
 
 ```json
+{"type": "status",      "content": "Starting investigation..."}
 {"type": "thinking",    "content": "Analyzing flow patterns..."}
 {"type": "tool_call",   "tool": "detect_anomalies", "arguments": {...}}
 {"type": "tool_result", "tool": "detect_anomalies", "result": "..."}
 {"type": "conclusion",  "content": "## Investigation Summary\n..."}
 {"type": "done"}
 ```
+
+All events also include a `timestamp` field (Unix epoch float).
 
 ---
 
@@ -189,6 +200,13 @@ python -m pytest src/Backend/tests/ -v
 
 166 tests covering graph construction, GNN forward/backward passes, temporal sequences, normalization, collation, and edge cases.
 
+| Test File | Focus |
+|:----------|:------|
+| `test_gnn_edge_cases.py` | Graph construction, GNN forward/backward, normalization, collation |
+| `test_temporal_gnn_full.py` | EvolveGCN-O training, temporal sequences, snapshot preparation |
+| `test_temporal_gnn_meticulous.py` | Edge-case coverage for LSTM weight evolution, empty graphs, single-node graphs |
+| `run_all.py` | Unified test runner — loads all suites, prints summary |
+
 ---
 
 ## Environment Variables
@@ -199,6 +217,41 @@ python -m pytest src/Backend/tests/ -v
 | `OPENAI_MODEL` | `gpt-4o` | Model to use for the agent |
 | `OPENAI_BASE_URL` | (none) | Custom endpoint (e.g., `http://localhost:11434/v1` for Ollama) |
 | `PORT` | `8000` | Server port |
+| `INCIDENTLENS_DATA_ROOT` | `data/` | Root directory for NDJSON data files |
+| `INCIDENTLENS_PACKETS_CSV` | `data/ssdp_packets_rich.csv` | Default raw packets CSV path |
+| `INCIDENTLENS_LABELS_CSV` | `data/SSDP_Flood_labels.csv` | Default ground-truth labels CSV path |
+
+---
+
+## CORS & Middleware
+
+The FastAPI server is configured with open CORS for development:
+
+```python
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],      # lock down in production
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
+
+> **Production note:** Restrict `allow_origins` to your frontend domain before deploying.
+
+The agent is instantiated as a **singleton** (`IncidentAgent`) and reused across all requests.
+
+---
+
+## Elasticsearch ML Functions
+
+`wrappers.py` also exposes 4 Elasticsearch ML anomaly-detection functions (optional — require an ML-licensed cluster):
+
+| Function | Purpose |
+|:---------|:--------|
+| `create_anomaly_detection_job()` | Create an ES ML job for flow anomaly detection |
+| `create_anomaly_datafeed()` | Attach a datafeed to an ML job |
+| `get_anomaly_records()` | Fetch anomaly records from an ML job |
+| `get_influencers()` | Get top influencers from an ML anomaly job |
 
 ---
 
@@ -208,4 +261,5 @@ python -m pytest src/Backend/tests/ -v
 2. **Singleton ES client** — Reused across all requests; matches Elasticsearch SDK best practices.
 3. **Pre-processed GNN inputs** — Self-loops, degree normalization, and NaN sanitization happen *once* at data-prep time, not in every forward pass.
 4. **Numpy-first graph building** — `graph_data_wrapper` uses composite key packing, `np.add.at`, and `searchsorted` for window assignment — no Python loops over packets.
+5. **Graceful mock fallback** — Frontend hooks silently fall back to mock data when the backend is unreachable, enabling offline UI development.
 

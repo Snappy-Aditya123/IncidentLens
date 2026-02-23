@@ -99,6 +99,7 @@ The agent doesn't just say "this is malicious" — it says *"this flow has 47x t
 ### Prerequisites
 
 - Python 3.12+
+- Node.js 18+ and npm (for the React frontend)
 - Docker (for Elasticsearch + Kibana)
 - An OpenAI-compatible API key (OpenAI, Azure OpenAI, or local Ollama)
 
@@ -177,7 +178,7 @@ The Vite dev server proxies `/api` and `/ws` requests to the backend at `localho
 IncidentLens/
 ├── src/
 │   ├── Backend/                        # Python backend
-│   │   ├── main.py                     # Unified CLI entry point
+│   │   ├── main.py                     # CLI shim → delegates to testingentry
 │   │   ├── agent.py                    # LLM agent — multi-step reasoning loop
 │   │   ├── agent_tools.py              # 15 tools with OpenAI function-calling schemas
 │   │   ├── server.py                   # FastAPI server (REST + WebSocket + Incident API)
@@ -189,7 +190,14 @@ IncidentLens/
 │   │   ├── gnn_interface.py            # Abstract GNN encoder contract
 │   │   ├── ingest_pipeline.py          # 8-step data ingestion pipeline
 │   │   ├── csv_to_json.py              # CSV → NDJSON converter
+│   │   ├── GNN.py                      # (Deprecated) standalone EdgeGNN ref
+│   │   ├── testingentry.py             # (Legacy duplicate — canonical copy in tests/)
 │   │   └── tests/                      # 166 tests (100% pass)
+│   │       ├── testingentry.py         # Actual CLI implementation (5 commands)
+│   │       ├── test_gnn_edge_cases.py
+│   │       ├── test_temporal_gnn_full.py
+│   │       ├── test_temporal_gnn_meticulous.py
+│   │       └── run_all.py              # Test suite runner
 │   ├── Front/                          # React frontend
 │   │   ├── package.json                 # Dependencies + scripts (dev, build, preview)
 │   │   ├── vite.config.ts               # Vite 6 + proxy (/api → :8000, /ws → :8000)
@@ -201,7 +209,7 @@ IncidentLens/
 │   │   │   ├── routes.tsx               # Route definitions
 │   │   │   ├── types.ts                 # Shared UI + backend response types
 │   │   │   ├── services/api.ts          # Typed fetch client + WebSocket stream
-│   │   │   ├── hooks/useApi.ts          # 7 hooks — live API with mock fallback
+│   │   │   ├── hooks/useApi.ts          # 8 hooks — live API with mock fallback
 │   │   │   ├── components/
 │   │   │   │   ├── Dashboard.tsx         # Incident list + stats (live data)
 │   │   │   │   ├── Investigation.tsx     # 4-step wizard (live data)
@@ -209,7 +217,7 @@ IncidentLens/
 │   │   │   │   │   ├── ElasticsearchStep.tsx  # ES log analysis
 │   │   │   │   │   ├── GNNStep.tsx            # D3 network graph
 │   │   │   │   │   └── CounterfactualStep.tsx # Explainability
-│   │   │   │   └── ui/                  # 48 shadcn/ui primitives
+│   │   │   │   └── ui/                  # 46 shadcn/ui components + utilities
 │   │   │   └── data/mockData.ts         # Mock data for offline fallback
 │   │   └── styles/                      # Tailwind v4 + oklch theme tokens
 │   └── docker-compose.yml               # ES 8.12 + Kibana 8.12
@@ -249,7 +257,7 @@ IncidentLens/
 
 **Protocol:** Connect → send `{"query": "..."}` → receive streaming events → receive `{"type": "done"}`.
 
-Event types: `thinking`, `tool_call`, `tool_result`, `conclusion`, `error`, `status`.
+Event types: `thinking`, `tool_call`, `tool_result`, `conclusion`, `error`, `status`, `done`.
 
 ---
 
@@ -293,7 +301,7 @@ Event types: `thinking`, `tool_call`, `tool_result`, `conclusion`, `error`, `sta
 - **Pre-processed GNN bottleneck removal** — Self-loops and degree normalization cached at data-prep time; LSTM weight evolution flattened from O(hidden_dim) batches to O(1).
 - **Singleton ES client** with retry logic, bulk indexing with batch MD5 flow-ID generation, and pre-converted numpy→Python type coercion for minimal per-document overhead.
 - **166 tests** covering graph construction, GNN forward/backward passes, temporal sequences, normalization, and edge-case handling — all passing.
-- **Full-stack integration** — Typed API service layer (`services/api.ts`) with 10+ typed fetch functions, WebSocket async-generator streaming client, and 7 React hooks (`useIncidents`, `useIncident`, `useElasticsearchData`, `useNetworkGraph`, `useCounterfactual`, `useSeverity`, `useInvestigationStream`) that try the live backend first and fall back to mock data for offline development.
+- **Full-stack integration** — Typed API service layer (`services/api.ts`) with 10+ typed fetch functions, WebSocket async-generator streaming client, and 8 React hooks (`useBackendHealth`, `useIncidents`, `useIncident`, `useElasticsearchData`, `useNetworkGraph`, `useCounterfactual`, `useSeverity`, `useInvestigationStream`) that try the live backend first and fall back to mock data for offline development.
 - **Zero-config dev proxy** — Vite dev server on `:5173` proxies `/api` and `/ws` to the FastAPI backend on `:8000`, so frontend and backend can be developed and run simultaneously with no CORS issues.
 
 ---
