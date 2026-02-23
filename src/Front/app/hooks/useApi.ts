@@ -13,7 +13,6 @@ import type {
   NetworkGraphData,
   ElasticsearchData,
   CounterfactualExplanation,
-  BackendFlow,
   BackendCounterfactualResponse,
   BackendSeverityResponse,
   InvestigationEvent,
@@ -89,23 +88,6 @@ export function useBackendHealth() {
 /* ──────────────────────────────────────────────
  * Incidents list  (detect → map to Incident[])
  * ────────────────────────────────────────────── */
-
-function flowToIncident(flow: BackendFlow, index: number): Incident {
-  const score = flow.prediction_score ?? (flow.label === 1 ? 0.85 : 0.2);
-  const severity: Incident["severity"] =
-    score > 0.9 ? "critical" : score > 0.7 ? "high" : score > 0.5 ? "medium" : "low";
-
-  return {
-    id: flow._id,
-    title: `Anomalous Flow: ${flow.src_ip} → ${flow.dst_ip}`,
-    severity,
-    status: "investigating",
-    timestamp: new Date().toISOString(),
-    affectedSystems: [flow.src_ip, flow.dst_ip].filter(Boolean) as string[],
-    description: `Detected anomalous traffic — ${flow.packet_count ?? "?"} packets, ${flow.total_bytes ?? "?"} bytes. Prediction score: ${(score * 100).toFixed(0)}%.`,
-    anomalyScore: score,
-  };
-}
 
 export function useIncidents(): UseAsyncResult<Incident[]> {
   return useAsync(async () => {

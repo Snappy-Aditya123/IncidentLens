@@ -616,7 +616,7 @@ def full_text_search_counterfactuals(
         {
             **hit["_source"],
             "_score": hit["_score"],
-            "_highlights": hit.get("highlight", {}).get("explanation_text", []),
+            "highlight": hit.get("highlight", {}),
         }
         for hit in resp["hits"]["hits"]
     ]

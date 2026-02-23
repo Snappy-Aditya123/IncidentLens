@@ -95,7 +95,7 @@ export async function getFlowCounterfactual(flowId: string): Promise<BackendCoun
   });
 }
 
-export async function getSimilarIncidents(flowId: string, k = 5): Promise<{ flow_id: string; similar: BackendFlow[] }> {
+export async function getSimilarIncidents(flowId: string, k = 5): Promise<{ query_flow: string; similar: BackendFlow[] }> {
   return fetchJson(`/api/similar/${encodeURIComponent(flowId)}?k=${k}`);
 }
 

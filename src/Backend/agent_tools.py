@@ -359,10 +359,6 @@ def _tool_graph_window_compare(window_a: int | None = None, window_b: int | None
 # 14. Assess severity
 # ──────────────────────────────────────────────
 
-# TTL-based cache for detect_anomalies (most frequently called tool)
-_DETECT_CACHE: dict[str, Any] = {"data": None, "ts": 0.0, "key": ""}
-_DETECT_TTL = 15.0  # seconds
-
 
 # ──────────────────────────────────────────────
 # 15. ES ML anomaly detection — get anomaly records

@@ -495,8 +495,16 @@ async def severity_breakdown():
     server-side via Painless scripts — zero Python iteration.
     """
     try:
-        result = await asyncio.to_thread(wrappers.aggregate_severity_breakdown)
-        return result
+        raw = await asyncio.to_thread(wrappers.aggregate_severity_breakdown)
+        # Transform to match SeverityBreakdownResponse contract
+        severity_levels = raw.get("severity", {})
+        volume_cats = raw.get("volume", {})
+        total = sum(severity_levels.values()) if severity_levels else 0
+        return {
+            "severity_levels": severity_levels,
+            "traffic_volume_categories": volume_cats,
+            "total_flows": total,
+        }
     except Exception as e:
         return JSONResponse(status_code=502, content={"error": str(e)})
 
@@ -570,9 +578,15 @@ async def aggregate_field(
     terms aggregation would silently truncate.
     """
     try:
-        buckets = await asyncio.to_thread(
+        raw_buckets = await asyncio.to_thread(
             wrappers.composite_aggregation, field, None, size,
         )
+        # Flatten composite keys: {"key": {"src_ip": "10.0.0.1"}} → {"key": "10.0.0.1"}
+        buckets = []
+        for b in raw_buckets:
+            key_obj = b.get("key", {})
+            flat_key = next(iter(key_obj.values()), "") if isinstance(key_obj, dict) else str(key_obj)
+            buckets.append({"key": flat_key, "doc_count": b.get("doc_count", 0)})
         return {"field": field, "buckets": buckets, "total_buckets": len(buckets)}
     except Exception as e:
         return JSONResponse(status_code=502, content={"error": str(e)})
