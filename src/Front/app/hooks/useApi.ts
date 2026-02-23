@@ -17,6 +17,10 @@ import type {
   BackendCounterfactualResponse,
   BackendSeverityResponse,
   InvestigationEvent,
+  SeverityBreakdownResponse,
+  MLAnomaliesResponse,
+  MLInfluencersResponse,
+  CounterfactualSearchResponse,
 } from "../types";
 import * as api from "../services/api";
 import {
@@ -106,9 +110,9 @@ function flowToIncident(flow: BackendFlow, index: number): Incident {
 export function useIncidents(): UseAsyncResult<Incident[]> {
   return useAsync(async () => {
     try {
-      const res = await api.detectAnomalies({ size: 50 });
-      if (res.flows.length > 0) {
-        return res.flows.map(flowToIncident);
+      const res = await api.listIncidents(50);
+      if (res.incidents.length > 0) {
+        return res.incidents;
       }
     } catch {
       // backend unavailable — fall through to mock
@@ -125,12 +129,10 @@ export function useIncident(incidentId: string | undefined): UseAsyncResult<Inci
   return useAsync(async () => {
     if (!incidentId) return null;
     try {
-      // Try fetching all incidents and finding the one
-      const res = await api.detectAnomalies({ size: 100 });
-      const flow = res.flows.find((f) => f._id === incidentId);
-      if (flow) return flowToIncident(flow, 0);
+      // Direct single-incident endpoint — no fetch-all needed
+      return await api.getIncident(incidentId);
     } catch {
-      // fall through
+      // fall through to mock
     }
     return mockIncidents.find((i) => i.id === incidentId) ?? null;
   }, [incidentId]);
@@ -144,12 +146,7 @@ export function useElasticsearchData(incidentId: string | undefined): UseAsyncRe
   return useAsync(async () => {
     if (!incidentId) return null;
     try {
-      // Use the incident-scoped logs endpoint
-      const res = await fetch(`/api/incidents/${encodeURIComponent(incidentId)}/logs?size=20`);
-      if (res.ok) {
-        const data = await res.json();
-        return data as ElasticsearchData;
-      }
+      return await api.getIncidentLogs(incidentId, 20);
     } catch {
       // fall through
     }
@@ -166,65 +163,14 @@ export function useNetworkGraph(incidentId: string | undefined): UseAsyncResult<
   return useAsync(async () => {
     if (!incidentId) return null;
     try {
-      // Use the incident-scoped graph endpoint
-      const res = await fetch(`/api/incidents/${encodeURIComponent(incidentId)}/graph?size=30`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.nodes?.length > 0) return data as NetworkGraphData;
-      }
+      const data = await api.getIncidentGraph(incidentId, 30);
+      if (data.nodes?.length > 0) return data;
     } catch {
       // fall through
     }
     const mock = mockNetworkGraph[incidentId as keyof typeof mockNetworkGraph];
     return mock ?? null;
   }, [incidentId]);
-}
-
-/**
- * Transform a set of backend flows into a force-graph-compatible
- * nodes + edges structure for the D3 visualisation.
- */
-function flowsToGraph(flows: BackendFlow[]): NetworkGraphData {
-  const nodeMap = new Map<string, { risk: number; label: number }>();
-
-  for (const f of flows) {
-    if (f.src_ip) {
-      const prev = nodeMap.get(f.src_ip);
-      const score = f.prediction_score ?? (f.label === 1 ? 0.8 : 0.15);
-      nodeMap.set(f.src_ip, {
-        risk: Math.max(prev?.risk ?? 0, score),
-        label: Math.max(prev?.label ?? 0, f.label),
-      });
-    }
-    if (f.dst_ip) {
-      const prev = nodeMap.get(f.dst_ip);
-      const score = f.prediction_score ?? (f.label === 1 ? 0.8 : 0.15);
-      nodeMap.set(f.dst_ip, {
-        risk: Math.max(prev?.risk ?? 0, score),
-        label: Math.max(prev?.label ?? 0, f.label),
-      });
-    }
-  }
-
-  const nodes = Array.from(nodeMap.entries()).map(([ip, info]) => ({
-    id: ip,
-    label: ip,
-    type: "server" as const,
-    status: info.risk > 0.8 ? "compromised" as const : info.risk > 0.5 ? "suspicious" as const : "normal" as const,
-    risk: info.risk,
-  }));
-
-  const edges = flows
-    .filter((f) => f.src_ip && f.dst_ip)
-    .map((f) => ({
-      source: f.src_ip,
-      target: f.dst_ip,
-      type: "data_flow" as const,
-      weight: Math.min((f.packet_count ?? 1) / 100, 10),
-      anomalous: f.label === 1,
-    }));
-
-  return { nodes, edges };
 }
 
 /* ──────────────────────────────────────────────
@@ -326,4 +272,80 @@ export function useInvestigationStream() {
   }, []);
 
   return { events, running, error, start, stop };
+}
+
+/* ──────────────────────────────────────────────
+ * ES-NATIVE ANALYTICS HOOKS
+ * These leverage Elasticsearch capabilities beyond basic CRUD:
+ * runtime fields, ML anomaly detection, full-text search, composite aggs.
+ * ────────────────────────────────────────────── */
+
+/**
+ * Severity distribution computed entirely server-side using ES runtime fields
+ * and Painless scripts — zero client-side iteration.
+ */
+export function useSeverityBreakdown(): UseAsyncResult<SeverityBreakdownResponse | null> {
+  return useAsync(async () => {
+    try {
+      return await api.getSeverityBreakdown();
+    } catch {
+      return null;
+    }
+  }, []);
+}
+
+/**
+ * ES ML anomaly detection records above a score threshold.
+ * Each record includes influencers — direct feature attribution from ES.
+ */
+export function useMLAnomalies(
+  jobId?: string,
+  minScore = 75,
+): UseAsyncResult<MLAnomaliesResponse | null> {
+  return useAsync(async () => {
+    try {
+      return await api.getMLAnomalies({
+        job_id: jobId,
+        min_score: minScore,
+      });
+    } catch {
+      return null;
+    }
+  }, [jobId, minScore]);
+}
+
+/**
+ * ES ML influencer results — which field values contributed most to anomalies.
+ */
+export function useMLInfluencers(
+  jobId?: string,
+  minScore = 50,
+): UseAsyncResult<MLInfluencersResponse | null> {
+  return useAsync(async () => {
+    try {
+      return await api.getMLInfluencers({
+        job_id: jobId,
+        min_score: minScore,
+      });
+    } catch {
+      return null;
+    }
+  }, [jobId, minScore]);
+}
+
+/**
+ * Full-text search over counterfactual explanation narratives.
+ * Supports natural-language queries.
+ */
+export function useCounterfactualSearch(
+  query: string | undefined,
+): UseAsyncResult<CounterfactualSearchResponse | null> {
+  return useAsync(async () => {
+    if (!query?.trim()) return null;
+    try {
+      return await api.searchCounterfactuals(query);
+    } catch {
+      return null;
+    }
+  }, [query]);
 }

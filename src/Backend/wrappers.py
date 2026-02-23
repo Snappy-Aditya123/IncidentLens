@@ -195,6 +195,432 @@ COUNTERFACTUALS_MAPPING = {
 
 EMBEDDINGS_MAPPING_DIM = 16  # default matches generate_embeddings & run_pipeline defaults
 
+# ──────────────────────────────────────────────
+# 2b. ES-NATIVE ENHANCEMENTS: runtime fields, ILM, index templates, ingest pipelines
+# ──────────────────────────────────────────────
+
+# --- Runtime fields: severity scoring at query time (zero re-indexing) ---
+# ES computes these on-the-fly using Painless scripts, so the severity
+# classification is always consistent and doesn't require Python.
+
+SEVERITY_RUNTIME_FIELDS = {
+    "severity_level": {
+        "type": "keyword",
+        "script": {
+            "source": """
+                double score = 0.0;
+                if (doc.containsKey('prediction_score') && doc['prediction_score'].size() > 0) {
+                    score = doc['prediction_score'].value;
+                } else if (doc.containsKey('label') && doc['label'].size() > 0 && doc['label'].value == 1) {
+                    score = 0.85;
+                }
+                if (score > 0.9)      emit('critical');
+                else if (score > 0.7) emit('high');
+                else if (score > 0.5) emit('medium');
+                else                  emit('low');
+            """
+        },
+    },
+    "severity_score": {
+        "type": "double",
+        "script": {
+            "source": """
+                if (doc.containsKey('prediction_score') && doc['prediction_score'].size() > 0) {
+                    emit(doc['prediction_score'].value);
+                } else if (doc.containsKey('label') && doc['label'].size() > 0 && doc['label'].value == 1) {
+                    emit(0.85);
+                } else {
+                    emit(0.2);
+                }
+            """
+        },
+    },
+    "traffic_volume_category": {
+        "type": "keyword",
+        "script": {
+            "source": """
+                double bytes = 0;
+                if (doc.containsKey('total_bytes') && doc['total_bytes'].size() > 0) {
+                    bytes = doc['total_bytes'].value;
+                }
+                if (bytes > 100000)     emit('flood');
+                else if (bytes > 10000) emit('high');
+                else if (bytes > 1000)  emit('moderate');
+                else                    emit('low');
+            """
+        },
+    },
+}
+
+# --- ILM policy: auto-manage index lifecycle ---
+ILM_POLICY_NAME = "incidentlens-lifecycle"
+ILM_POLICY_BODY = {
+    "policy": {
+        "phases": {
+            "hot": {
+                "min_age": "0ms",
+                "actions": {
+                    "rollover": {
+                        "max_primary_shard_size": "50gb",
+                        "max_age": "7d",
+                    },
+                    "set_priority": {"priority": 100},
+                },
+            },
+            "warm": {
+                "min_age": "7d",
+                "actions": {
+                    "shrink": {"number_of_shards": 1},
+                    "forcemerge": {"max_num_segments": 1},
+                    "set_priority": {"priority": 50},
+                },
+            },
+            "delete": {
+                "min_age": "90d",
+                "actions": {"delete": {}},
+            },
+        }
+    }
+}
+
+# --- ES-level ingest pipeline: NaN/Inf cleanup + timestamp normalisation ---
+INGEST_PIPELINE_NAME = "incidentlens-cleanup"
+INGEST_PIPELINE_BODY = {
+    "description": "IncidentLens flow cleanup: replace NaN/Inf, add @timestamp",
+    "processors": [
+        # Set @timestamp from epoch_millis timestamp field
+        {
+            "date": {
+                "field": "timestamp",
+                "target_field": "@timestamp",
+                "formats": ["epoch_millis", "ISO8601"],
+                "ignore_failure": True,
+            }
+        },
+        # Default @timestamp to ingest time if timestamp field is missing  
+        {
+            "set": {
+                "field": "@timestamp",
+                "value": "{{_ingest.timestamp}}",
+                "override": False,
+            }
+        },
+        # Ensure numeric fields have safe values (NaN/null → 0)
+        {
+            "script": {
+                "source": """
+                    def fields = ['packet_count','total_bytes','mean_payload','mean_iat','std_iat','prediction_score'];
+                    for (def f : fields) {
+                        if (ctx.containsKey(f)) {
+                            def v = ctx[f];
+                            if (v == null || (v instanceof Number && (v.isNaN() || v.isInfinite()))) {
+                                ctx[f] = 0.0;
+                            }
+                        }
+                    }
+                """,
+                "ignore_failure": True,
+            }
+        },
+    ],
+}
+
+# --- Index templates: ensure consistent mappings across environments ---
+FLOWS_TEMPLATE_NAME = "incidentlens-flows-template"
+EMBEDDINGS_TEMPLATE_NAME = "incidentlens-embeddings-template"
+COUNTERFACTUALS_TEMPLATE_NAME = "incidentlens-counterfactuals-template"
+
+
+def setup_ilm_policy(es: Elasticsearch | None = None) -> bool:
+    """Create the ILM policy for automatic index lifecycle management.
+
+    Returns True if the policy was created or already exists.
+    """
+    es = es or get_client()
+    try:
+        es.ilm.put_lifecycle(name=ILM_POLICY_NAME, body=ILM_POLICY_BODY)
+        logger.info("ILM policy '%s' created/updated", ILM_POLICY_NAME)
+        return True
+    except Exception as e:
+        logger.warning("ILM policy setup skipped (may require license): %s", e)
+        return False
+
+
+def setup_ingest_pipeline(es: Elasticsearch | None = None) -> bool:
+    """Create the ES-level ingest pipeline for NaN/Inf cleanup.
+
+    Returns True if the pipeline was created.
+    """
+    es = es or get_client()
+    try:
+        es.ingest.put_pipeline(id=INGEST_PIPELINE_NAME, body=INGEST_PIPELINE_BODY)
+        logger.info("Ingest pipeline '%s' created", INGEST_PIPELINE_NAME)
+        return True
+    except Exception as e:
+        logger.warning("Ingest pipeline setup failed: %s", e)
+        return False
+
+
+def setup_index_templates(es: Elasticsearch | None = None, embedding_dim: int = EMBEDDINGS_MAPPING_DIM) -> dict[str, bool]:
+    """Create index templates for all IncidentLens indices.
+
+    Templates ensure consistent mappings and settings regardless of
+    which environment creates the index (dev, CI, prod).
+    """
+    es = es or get_client()
+    results: dict[str, bool] = {}
+
+    templates = [
+        (FLOWS_TEMPLATE_NAME, [f"{FLOWS_INDEX}*"], FLOWS_MAPPING),
+        (COUNTERFACTUALS_TEMPLATE_NAME, [f"{COUNTERFACTUALS_INDEX}*"], COUNTERFACTUALS_MAPPING),
+        (EMBEDDINGS_TEMPLATE_NAME, [f"{EMBEDDINGS_INDEX}*"], _embeddings_mapping(embedding_dim)),
+    ]
+
+    for name, patterns, body in templates:
+        try:
+            es.indices.put_template(
+                name=name,
+                body={
+                    "index_patterns": patterns,
+                    "settings": body.get("settings", {}),
+                    "mappings": body.get("mappings", {}),
+                },
+            )
+            results[name] = True
+            logger.info("Index template '%s' created", name)
+        except Exception as e:
+            results[name] = False
+            logger.warning("Index template '%s' failed: %s", name, e)
+
+    return results
+
+
+def search_flows_with_severity(
+    query: dict | None = None,
+    severity: str | None = None,
+    size: int = 20,
+    es: Elasticsearch | None = None,
+) -> list[dict]:
+    """Search flows using ES runtime fields for severity classification.
+
+    This leverages Elasticsearch's runtime fields to compute severity_level
+    at query time — no re-indexing needed when thresholds change.
+
+    Parameters
+    ----------
+    query : optional base query (default: match_all)
+    severity : filter by runtime-computed severity ('critical','high','medium','low')
+    size : max results
+    """
+    es = es or get_client()
+    base_query = query or {"match_all": {}}
+
+    if severity:
+        # Wrap the base query with a severity filter using runtime fields
+        base_query = {
+            "bool": {
+                "must": [base_query],
+                "filter": [{"term": {"severity_level": severity}}],
+            }
+        }
+
+    body: dict[str, Any] = {
+        "size": size,
+        "runtime_mappings": SEVERITY_RUNTIME_FIELDS,
+        "query": base_query,
+        "fields": ["severity_level", "severity_score", "traffic_volume_category"],
+        "sort": [{"severity_score": {"order": "desc"}}],
+    }
+
+    resp = es.search(index=FLOWS_INDEX, body=body)
+    results = []
+    for hit in resp["hits"]["hits"]:
+        doc = hit["_source"]
+        doc["_id"] = hit["_id"]
+        # Merge runtime fields into the doc
+        for rf in ("severity_level", "severity_score", "traffic_volume_category"):
+            vals = hit.get("fields", {}).get(rf)
+            if vals:
+                doc[rf] = vals[0]
+        results.append(doc)
+    return results
+
+
+def aggregate_severity_breakdown(
+    es: Elasticsearch | None = None,
+) -> dict[str, int]:
+    """Use ES runtime fields + terms aggregation to get severity distribution.
+
+    Returns {"critical": N, "high": N, "medium": N, "low": N} computed
+    entirely server-side by Elasticsearch — zero Python iteration.
+    """
+    es = es or get_client()
+    body = {
+        "size": 0,
+        "runtime_mappings": SEVERITY_RUNTIME_FIELDS,
+        "aggs": {
+            "by_severity": {
+                "terms": {"field": "severity_level", "size": 10}
+            },
+            "by_volume": {
+                "terms": {"field": "traffic_volume_category", "size": 10}
+            },
+        },
+    }
+    resp = es.search(index=FLOWS_INDEX, body=body)
+    severity_dist = {
+        b["key"]: b["doc_count"]
+        for b in resp["aggregations"]["by_severity"]["buckets"]
+    }
+    volume_dist = {
+        b["key"]: b["doc_count"]
+        for b in resp["aggregations"]["by_volume"]["buckets"]
+    }
+    return {"severity": severity_dist, "volume": volume_dist}
+
+
+def search_with_pagination(
+    query: dict | None = None,
+    size: int = 20,
+    search_after: list | None = None,
+    pit_id: str | None = None,
+    es: Elasticsearch | None = None,
+) -> dict:
+    """Paginate large result sets using ES search_after + point-in-time.
+
+    This is the recommended Elasticsearch approach for deep pagination —
+    unlike `from + size`, it doesn't degrade with depth and provides a
+    consistent snapshot of the data.
+
+    Returns {"hits": [...], "pit_id": str, "search_after": list, "total": int}
+    """
+    es = es or get_client()
+
+    # Open a PIT if none provided
+    if pit_id is None:
+        pit_resp = es.open_point_in_time(index=FLOWS_INDEX, keep_alive="2m")
+        pit_id = pit_resp["id"]
+
+    body: dict[str, Any] = {
+        "size": size,
+        "query": query or {"match_all": {}},
+        "pit": {"id": pit_id, "keep_alive": "2m"},
+        "sort": [{"timestamp": "desc"}, {"_shard_doc": "asc"}],
+    }
+    if search_after:
+        body["search_after"] = search_after
+
+    resp = es.search(body=body)
+    hits = resp["hits"]["hits"]
+    docs = []
+    for h in hits:
+        doc = h["_source"]
+        doc["_id"] = h["_id"]
+        docs.append(doc)
+
+    last_sort = hits[-1]["sort"] if hits else None
+    return {
+        "hits": docs,
+        "pit_id": pit_id,
+        "search_after": last_sort,
+        "total": resp["hits"]["total"]["value"],
+    }
+
+
+def close_pit(pit_id: str, es: Elasticsearch | None = None) -> bool:
+    """Close a point-in-time to release server resources."""
+    es = es or get_client()
+    try:
+        es.close_point_in_time(body={"id": pit_id})
+        return True
+    except Exception:
+        return False
+
+
+def composite_aggregation(
+    field: str,
+    sub_aggs: dict | None = None,
+    size: int = 100,
+    es: Elasticsearch | None = None,
+) -> list[dict]:
+    """Paginate through ALL aggregation buckets using ES composite aggregation.
+
+    Unlike terms aggregation (limited by size), composite agg handles
+    unbounded cardinality — essential for large IP spaces.
+
+    Parameters
+    ----------
+    field : the field to aggregate on (e.g. 'src_ip')
+    sub_aggs : optional sub-aggregations per bucket
+    size : page size per request
+    """
+    es = es or get_client()
+    all_buckets: list[dict] = []
+    after_key = None
+
+    while True:
+        sources = [{field: {"terms": {"field": field}}}]
+        composite: dict[str, Any] = {"size": size, "sources": sources}
+        if after_key:
+            composite["after"] = after_key
+
+        aggs: dict[str, Any] = {"composite_agg": {"composite": composite}}
+        if sub_aggs:
+            aggs["composite_agg"]["aggs"] = sub_aggs
+
+        body = {"size": 0, "aggs": aggs}
+        resp = es.search(index=FLOWS_INDEX, body=body)
+        buckets = resp["aggregations"]["composite_agg"]["buckets"]
+
+        if not buckets:
+            break
+
+        all_buckets.extend(buckets)
+        after_key = buckets[-1]["key"]
+
+        # Safety: if we got fewer than page size, we've reached the end
+        if len(buckets) < size:
+            break
+
+    return all_buckets
+
+
+def full_text_search_counterfactuals(
+    query_text: str,
+    size: int = 10,
+    es: Elasticsearch | None = None,
+) -> list[dict]:
+    """Search counterfactual explanations using full-text search.
+
+    The `explanation_text` field is mapped as `text` — this leverages
+    ES's text analysis pipeline (tokenisation, stemming, relevance scoring)
+    for natural-language queries over CF narratives.
+    """
+    es = es or get_client()
+    body = {
+        "size": size,
+        "query": {
+            "match": {
+                "explanation_text": {
+                    "query": query_text,
+                    "fuzziness": "AUTO",
+                }
+            }
+        },
+        "highlight": {
+            "fields": {"explanation_text": {}},
+        },
+    }
+    resp = es.search(index=COUNTERFACTUALS_INDEX, body=body)
+    return [
+        {
+            **hit["_source"],
+            "_score": hit["_score"],
+            "_highlights": hit.get("highlight", {}).get("explanation_text", []),
+        }
+        for hit in resp["hits"]["hits"]
+    ]
+
 
 def _embeddings_mapping(dim: int = EMBEDDINGS_MAPPING_DIM) -> dict:
     return {
@@ -246,8 +672,23 @@ def setup_all_indices(
     embedding_dim: int = EMBEDDINGS_MAPPING_DIM,
     delete_existing: bool = False,
 ) -> dict[str, bool]:
-    """Create all three project indices. Returns {name: was_created}."""
+    """Create all project indices, plus ES-native infrastructure.
+
+    Sets up:
+    1. ILM policy for automatic lifecycle management
+    2. ES ingest pipeline for NaN/Inf cleanup + timestamp normalisation
+    3. Index templates for consistent mappings across environments
+    4. The three data indices (flows, counterfactuals, embeddings)
+
+    Returns {name: was_created} for the three data indices.
+    """
     es = es or get_client()
+
+    # ES infrastructure (best-effort — some features need a licence)
+    setup_ilm_policy(es)
+    setup_ingest_pipeline(es)
+    setup_index_templates(es, embedding_dim=embedding_dim)
+
     return {
         FLOWS_INDEX: create_index(FLOWS_INDEX, FLOWS_MAPPING, es, delete_existing),
         COUNTERFACTUALS_INDEX: create_index(
@@ -1277,7 +1718,7 @@ def search_flows(
     sort: list | None = None,
     es: Elasticsearch | None = None,
 ) -> list[dict]:
-    """General-purpose flow search."""
+    """General-purpose flow search.  Includes ES ``_id`` in results."""
     es = es or get_client()
     body: dict[str, Any] = {
         "size": size,
@@ -1286,7 +1727,14 @@ def search_flows(
     if sort:
         body["sort"] = sort
     resp = es.search(index=FLOWS_INDEX, body=body)
-    return [hit["_source"] for hit in resp["hits"]["hits"]]
+    results = []
+    for hit in resp["hits"]["hits"]:
+        doc = hit["_source"]
+        doc["_id"] = hit["_id"]
+        if hit.get("_score") is not None:
+            doc["_score"] = hit["_score"]
+        results.append(doc)
+    return results
 
 
 def search_anomalous_flows(

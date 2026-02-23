@@ -16,6 +16,15 @@ import type {
   BackendHealthResponse,
   BackendSeverityResponse,
   InvestigationEvent,
+  SeverityBreakdownResponse,
+  PaginatedFlowsResponse,
+  CounterfactualSearchResponse,
+  MLAnomaliesResponse,
+  MLInfluencersResponse,
+  AggregationResponse,
+  Incident,
+  NetworkGraphData,
+  ElasticsearchData,
 } from "../types";
 
 const BASE = "";  // same-origin — Vite proxy handles /api → backend
@@ -104,6 +113,127 @@ export async function investigate(query: string): Promise<{ events: Investigatio
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ query }),
   });
+}
+
+/* ─── incident endpoints (direct wrappers) ─── */
+
+export async function listIncidents(size = 50): Promise<{ count: number; incidents: Incident[] }> {
+  return fetchJson<{ count: number; incidents: Incident[] }>(`/api/incidents?size=${size}`);
+}
+
+export async function getIncident(id: string): Promise<Incident> {
+  return fetchJson<Incident>(`/api/incidents/${encodeURIComponent(id)}`);
+}
+
+export async function getIncidentGraph(id: string, size = 30): Promise<NetworkGraphData> {
+  return fetchJson<NetworkGraphData>(`/api/incidents/${encodeURIComponent(id)}/graph?size=${size}`);
+}
+
+export async function getIncidentLogs(id: string, size = 20): Promise<ElasticsearchData> {
+  return fetchJson<ElasticsearchData>(`/api/incidents/${encodeURIComponent(id)}/logs?size=${size}`);
+}
+
+/* ─── ES-native analytics ─────────────────── */
+
+/**
+ * Severity breakdown computed entirely server-side using ES runtime fields
+ * and Painless scripts — zero Python iteration.
+ */
+export async function getSeverityBreakdown(): Promise<SeverityBreakdownResponse> {
+  return fetchJson<SeverityBreakdownResponse>("/api/severity-breakdown");
+}
+
+/**
+ * Query flows by runtime-computed severity level (critical/high/medium/low).
+ * The severity is computed at query time by ES, not stored in the document.
+ */
+export async function getFlowsBySeverity(
+  severity: string = "critical",
+  size = 20,
+): Promise<BackendFlowsResponse & { severity: string }> {
+  return fetchJson(`/api/flows/severity?severity=${severity}&size=${size}`);
+}
+
+/**
+ * Paginated flow search using ES search_after + point-in-time.
+ * Unlike offset-based pagination, this doesn't degrade with depth.
+ */
+export async function searchFlowsPaginated(params?: {
+  query?: Record<string, unknown>;
+  size?: number;
+  search_after?: unknown[];
+  pit_id?: string;
+}): Promise<PaginatedFlowsResponse> {
+  return fetchJson<PaginatedFlowsResponse>("/api/flows/search", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      query: params?.query ?? null,
+      size: params?.size ?? 20,
+      search_after: params?.search_after ?? null,
+      pit_id: params?.pit_id ?? null,
+    }),
+  });
+}
+
+/**
+ * Full-text search over counterfactual explanation narratives.
+ * Supports natural-language queries like "high packet count from source".
+ */
+export async function searchCounterfactuals(
+  q: string,
+  size = 10,
+): Promise<CounterfactualSearchResponse> {
+  return fetchJson<CounterfactualSearchResponse>(
+    `/api/counterfactuals/search?q=${encodeURIComponent(q)}&size=${size}`,
+  );
+}
+
+/**
+ * Composite aggregation on any keyword field.
+ * Handles unbounded cardinality (many unique IPs) without truncation.
+ */
+export async function getAggregation(
+  field: string,
+  size = 100,
+): Promise<AggregationResponse> {
+  return fetchJson<AggregationResponse>(
+    `/api/aggregate/${encodeURIComponent(field)}?size=${size}`,
+  );
+}
+
+/**
+ * ES ML anomaly detection records.  Each record includes influencers —
+ * the field values that drove the anomaly.
+ */
+export async function getMLAnomalies(params?: {
+  job_id?: string;
+  min_score?: number;
+  size?: number;
+}): Promise<MLAnomaliesResponse> {
+  const qs = new URLSearchParams();
+  if (params?.job_id) qs.set("job_id", params.job_id);
+  if (params?.min_score !== undefined) qs.set("min_score", String(params.min_score));
+  if (params?.size !== undefined) qs.set("size", String(params.size));
+  const query = qs.toString();
+  return fetchJson<MLAnomaliesResponse>(`/api/ml/anomalies${query ? `?${query}` : ""}`);
+}
+
+/**
+ * ES ML influencer results — which src_ip, dst_ip, or protocol values
+ * contributed most to detected anomalies.
+ */
+export async function getMLInfluencers(params?: {
+  job_id?: string;
+  min_score?: number;
+  size?: number;
+}): Promise<MLInfluencersResponse> {
+  const qs = new URLSearchParams();
+  if (params?.job_id) qs.set("job_id", params.job_id);
+  if (params?.min_score !== undefined) qs.set("min_score", String(params.min_score));
+  if (params?.size !== undefined) qs.set("size", String(params.size));
+  const query = qs.toString();
+  return fetchJson<MLInfluencersResponse>(`/api/ml/influencers${query ? `?${query}` : ""}`);
 }
 
 /* ─── investigation WebSocket (streaming) ─── */

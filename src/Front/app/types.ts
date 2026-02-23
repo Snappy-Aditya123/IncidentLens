@@ -118,8 +118,9 @@ export interface BackendCounterfactualResponse {
 export interface BackendSeverityResponse {
   flow_id: string;
   severity: string;
-  z_scores: Record<string, number>;
-  max_z: number;
+  max_z_score: number;
+  feature_z_scores: Record<string, number>;
+  flow?: BackendFlow;
 }
 
 export interface BackendHealthResponse {
@@ -138,6 +139,7 @@ export type InvestigationEventType =
   | "tool_call"
   | "tool_result"
   | "conclusion"
+  | "status"
   | "error"
   | "done";
 
@@ -147,4 +149,92 @@ export interface InvestigationEvent {
   tool?: string;
   arguments?: Record<string, unknown>;
   result?: string;
+}
+
+/* ──────────────────────────────────────────────
+ * ES-native analytics response shapes
+ * ────────────────────────────────────────────── */
+
+/** Severity distribution computed by ES runtime fields. */
+export interface SeverityBreakdownResponse {
+  severity_levels: Record<string, number>;
+  traffic_volume_categories: Record<string, number>;
+  total_flows: number;
+}
+
+/** Paginated search result using search_after + PIT. */
+export interface PaginatedFlowsResponse {
+  hits: BackendFlow[];
+  pit_id: string;
+  search_after: unknown[] | null;
+  total: number;
+}
+
+/** Full-text counterfactual search result. */
+export interface CounterfactualSearchResult {
+  _id: string;
+  _score: number;
+  flow_id: string;
+  explanation_text: string;
+  highlight?: Record<string, string[]>;
+  [key: string]: unknown;
+}
+
+export interface CounterfactualSearchResponse {
+  query: string;
+  count: number;
+  results: CounterfactualSearchResult[];
+}
+
+/** ES ML anomaly record. */
+export interface MLAnomalyRecord {
+  record_score: number;
+  bucket_span: number;
+  detector_index: number;
+  is_interim: boolean;
+  timestamp: number;
+  function: string;
+  field_name?: string;
+  by_field_name?: string;
+  by_field_value?: string;
+  influencers: Array<{
+    influencer_field_name: string;
+    influencer_field_values: string[];
+  }>;
+  [key: string]: unknown;
+}
+
+export interface MLAnomaliesResponse {
+  job_id: string;
+  count: number;
+  records: MLAnomalyRecord[];
+}
+
+/** ES ML influencer result. */
+export interface MLInfluencer {
+  influencer_field_name: string;
+  influencer_field_value: string;
+  influencer_score: number;
+  initial_influencer_score: number;
+  bucket_span: number;
+  timestamp: number;
+  [key: string]: unknown;
+}
+
+export interface MLInfluencersResponse {
+  job_id: string;
+  count: number;
+  influencers: MLInfluencer[];
+}
+
+/** Composite aggregation buckets. */
+export interface AggregationBucket {
+  key: string;
+  doc_count: number;
+}
+
+export interface AggregationResponse {
+  field: string;
+  buckets: AggregationBucket[];
+  total_buckets: number;
 }

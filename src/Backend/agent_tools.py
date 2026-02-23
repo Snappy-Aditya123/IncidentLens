@@ -359,6 +359,109 @@ def _tool_graph_window_compare(window_a: int | None = None, window_b: int | None
 # 14. Assess severity
 # ──────────────────────────────────────────────
 
+# TTL-based cache for detect_anomalies (most frequently called tool)
+_DETECT_CACHE: dict[str, Any] = {"data": None, "ts": 0.0, "key": ""}
+_DETECT_TTL = 15.0  # seconds
+
+
+# ──────────────────────────────────────────────
+# 15. ES ML anomaly detection — get anomaly records
+# ──────────────────────────────────────────────
+
+@_register("get_ml_anomaly_records")
+def _tool_ml_anomaly_records(
+    job_id: str = "incidentlens-flow-anomaly",
+    min_score: float = 75.0,
+    size: int = 50,
+    **kwargs,
+) -> dict:
+    """Fetch ES ML anomaly detection records above a score threshold.
+
+    Each record includes influencers — the field values that drove
+    the anomaly — providing direct built-in feature attribution from
+    Elasticsearch's ML engine, complementing the GNN-based counterfactuals.
+    """
+    try:
+        records = wrappers.get_anomaly_records(
+            job_id=job_id, min_score=min_score, size=size,
+        )
+        return {
+            "job_id": job_id,
+            "min_score": min_score,
+            "count": len(records),
+            "records": records,
+        }
+    except Exception as e:
+        return {"error": f"ML anomaly records failed: {e}"}
+
+
+# ──────────────────────────────────────────────
+# 16. ES ML anomaly detection — get influencers
+# ──────────────────────────────────────────────
+
+@_register("get_ml_influencers")
+def _tool_ml_influencers(
+    job_id: str = "incidentlens-flow-anomaly",
+    min_score: float = 50.0,
+    size: int = 50,
+    **kwargs,
+) -> dict:
+    """Fetch ES ML influencer results — tells you WHICH src_ip, dst_ip,
+    or protocol values contributed most to detected anomalies.
+
+    Provides the raw material for root-cause analysis and complements
+    the GNN-based explanation with ES-native feature attribution.
+    """
+    try:
+        influencers = wrappers.get_influencers(
+            job_id=job_id, min_score=min_score, size=size,
+        )
+        return {
+            "job_id": job_id,
+            "min_score": min_score,
+            "count": len(influencers),
+            "influencers": influencers,
+        }
+    except Exception as e:
+        return {"error": f"ML influencers failed: {e}"}
+
+
+# ──────────────────────────────────────────────
+# 17. ES severity breakdown (runtime fields)
+# ──────────────────────────────────────────────
+
+@_register("severity_breakdown")
+def _tool_severity_breakdown(**kwargs) -> dict:
+    """Compute severity distribution using ES runtime fields + aggregation.
+
+    Runs the computation entirely on the ES cluster using Painless scripts —
+    zero Python iteration.  Returns bucket counts for critical/high/medium/low
+    and traffic volume categories.
+    """
+    try:
+        return wrappers.aggregate_severity_breakdown()
+    except Exception as e:
+        return {"error": f"Severity breakdown failed: {e}"}
+
+
+# ──────────────────────────────────────────────
+# 18. Full-text search over counterfactual narratives
+# ──────────────────────────────────────────────
+
+@_register("search_counterfactuals")
+def _tool_search_counterfactuals(query: str, size: int = 10, **kwargs) -> dict:
+    """Full-text search over counterfactual explanation narratives.
+
+    Uses ES text analysis (tokenisation, stemming, fuzzy matching) on the
+    ``explanation_text`` field — searches like "high packet count" work
+    naturally.
+    """
+    try:
+        results = wrappers.full_text_search_counterfactuals(query, size=size)
+        return {"query": query, "count": len(results), "results": results}
+    except Exception as e:
+        return {"error": f"Counterfactual search failed: {e}"}
+
 @_register("assess_severity")
 def _tool_severity(flow_id: str, **kwargs) -> dict:
     """Compute a severity level for a flow based on feature deviation
@@ -619,6 +722,61 @@ TOOL_SCHEMAS: list[dict] = [
                     "window_b": {"type": "integer", "description": "Second window index (default: most anomalous)"},
                 },
                 "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_ml_anomaly_records",
+            "description": "Fetch Elasticsearch ML anomaly detection records above a score threshold. Each record includes influencers — the field values that drove the anomaly. This is ES-native feature attribution that complements the GNN-based counterfactuals.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string", "description": "ML job ID (default: incidentlens-flow-anomaly)"},
+                    "min_score": {"type": "number", "description": "Minimum anomaly score (default: 75)"},
+                    "size": {"type": "integer", "description": "Max records to return"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_ml_influencers",
+            "description": "Fetch ES ML influencer results — tells you WHICH src_ip, dst_ip, or protocol values contributed most to detected anomalies. Provides root-cause signal that complements GNN-based explanations.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string", "description": "ML job ID (default: incidentlens-flow-anomaly)"},
+                    "min_score": {"type": "number", "description": "Minimum influencer score (default: 50)"},
+                    "size": {"type": "integer", "description": "Max influencers to return"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "severity_breakdown",
+            "description": "Compute severity distribution across all flows using ES runtime fields and aggregations. Runs entirely server-side via Painless scripts — zero Python iteration. Returns counts for critical/high/medium/low severity and traffic volume categories.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_counterfactuals",
+            "description": "Full-text search over counterfactual explanation narratives. Uses ES text analysis (tokenisation, stemming, fuzzy matching) on explanation_text — natural language queries like 'high packet count from source' work naturally.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Natural-language search query"},
+                    "size": {"type": "integer", "description": "Max results (default 10)"},
+                },
+                "required": ["query"],
             },
         },
     },
