@@ -82,13 +82,21 @@ class network:
 	def build_edge_index(self) -> torch.Tensor:
 		if self._edge_index_cache is not None:
 			return self._edge_index_cache
-		src_list = []
-		dst_list = []
-		for n in self.nodes.values():
-			for dst_id in n.out_neighbors:
-				src_list.append(n.node_id)
-				dst_list.append(dst_id)
-		edge_index = torch.tensor([src_list, dst_list], dtype=torch.long, device=self.device)
+		# Vectorised: pre-allocate numpy arrays instead of growing Python lists
+		total = sum(len(n.out_neighbors) for n in self.nodes.values())
+		if total == 0:
+			edge_index = torch.zeros((2, 0), dtype=torch.long, device=self.device)
+		else:
+			src_arr = np.empty(total, dtype=np.int64)
+			dst_arr = np.empty(total, dtype=np.int64)
+			pos = 0
+			for n in self.nodes.values():
+				k = len(n.out_neighbors)
+				if k:
+					src_arr[pos:pos + k] = n.node_id
+					dst_arr[pos:pos + k] = n.out_neighbors
+					pos += k
+			edge_index = torch.from_numpy(np.stack([src_arr, dst_arr])).to(self.device)
 		self._edge_index_cache = edge_index
 		return edge_index
 
@@ -221,21 +229,37 @@ def build_window_data(
 		"std_inter_arrival",
 	]
 
+	n_nodes = len(node_map)
+
+	# Pre-map IPs → integer codes ONCE (avoids per-window .map() overhead)
+	src_codes = flows_df[src_col].map(node_map).astype(np.int64).values
+	dst_codes = flows_df[dst_col].map(node_map).astype(np.int64).values
+	feat_arr = flows_df[feature_cols].to_numpy(dtype=np.float32)
+	label_arr = flows_df["edge_label"].to_numpy(dtype=np.float32)
+	wid_arr = flows_df["window_id"].values
+
+	# Vectorised split: sort by window_id + searchsorted boundaries
+	order = np.argsort(wid_arr, kind="mergesort")
+	wid_sorted = wid_arr[order]
+	unique_wids, first_idx = np.unique(wid_sorted, return_index=True)
+	splits = np.append(first_idx, len(wid_sorted))
+
 	data_list = []
-	for window_id, window_df in flows_df.groupby("window_id"):
-		src_ids = window_df[src_col].map(node_map).astype(int).to_numpy()
-		dst_ids = window_df[dst_col].map(node_map).astype(int).to_numpy()
-		edge_index = torch.from_numpy(np.stack([src_ids, dst_ids])).long()
-		edge_attr = torch.from_numpy(window_df[feature_cols].to_numpy().astype(np.float32))
-		y_edge = torch.from_numpy(window_df["edge_label"].to_numpy().astype(np.float32))
+	for i, wid in enumerate(unique_wids):
+		lo, hi = splits[i], splits[i + 1]
+		idx = order[lo:hi]
+		edge_index = torch.from_numpy(np.stack([src_codes[idx], dst_codes[idx]])).long()
+		edge_attr = torch.from_numpy(feat_arr[idx])
+		y_edge = torch.from_numpy(label_arr[idx])
 
 		data = Data(
 			edge_index=edge_index,
 			edge_attr=edge_attr,
 			y=y_edge,
-			num_nodes=len(node_map),
+			num_nodes=n_nodes,
 		)
-		data.window_id = int(window_id)
+		data.window_id = int(wid)
+		data.window_start = float(wid)  # temporal ordering key
 		data_list.append(data)
 
 	return data_list

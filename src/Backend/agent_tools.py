@@ -476,17 +476,17 @@ def _tool_severity(flow_id: str, **kwargs) -> dict:
         _STATS_CACHE["data"] = stats
         _STATS_CACHE["ts"] = now
 
-    scores = {}
-    for feat in wrappers.FEATURE_FIELDS:
-        val = flow.get(feat)
-        normal = stats.get(feat, {}).get("label_0", {})
-        avg = normal.get("avg", 0)
-        std = normal.get("std_deviation", 1)
-        if val is not None and std > 0:
-            z = abs(val - avg) / std
-            scores[feat] = round(z, 2)
-
-    max_z = max(scores.values()) if scores else 0
+    # Vectorised z-score computation via numpy (single array pass)
+    feats = wrappers.FEATURE_FIELDS
+    vals = np.array([flow.get(f, np.nan) for f in feats], dtype=np.float64)
+    avgs = np.array([stats.get(f, {}).get("label_0", {}).get("avg", 0) for f in feats], dtype=np.float64)
+    stds = np.array([stats.get(f, {}).get("label_0", {}).get("std_deviation", 1) for f in feats], dtype=np.float64)
+    stds[stds <= 0] = 1.0
+    valid = ~np.isnan(vals)
+    z = np.abs((vals - avgs) / stds)
+    z[~valid] = 0.0
+    scores = {f: round(float(z[i]), 2) for i, f in enumerate(feats) if valid[i]}
+    max_z = float(z[valid].max()) if valid.any() else 0.0
     if max_z >= 3:
         level = "high"
     elif max_z >= 1.5:

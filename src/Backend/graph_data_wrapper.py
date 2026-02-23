@@ -443,6 +443,10 @@ def edge_perturbation_counterfactual(
     (mean edge features, node degree distribution) to identify which
     connections have the greatest structural impact on the anomaly.
 
+    Vectorised: feature deltas are computed in a single (T, F) batch
+    operation, and structural impact uses the sum-of-squares update
+    formula to avoid O(N) recomputation per edge.
+
     Parameters
     ----------
     graph : PyG Data with edge_index, edge_attr, y
@@ -459,67 +463,80 @@ def edge_perturbation_counterfactual(
     labels = graph.y.cpu().numpy() if graph.y is not None else None
     n_edges = ei.shape[1]
 
-    if ea is None or n_edges == 0:
+    if ea is None or n_edges < 2:
         return []
 
-    # Baseline graph statistics
-    baseline_mean = ea.mean(axis=0)
-    baseline_degree = np.bincount(ei[0], minlength=graph.num_nodes) + \
-                      np.bincount(ei[1], minlength=graph.num_nodes)
+    n_nodes = graph.num_nodes
+
+    # Baseline statistics (computed once)
+    baseline_sum = ea.sum(axis=0)
+    baseline_mean = baseline_sum / n_edges
+    baseline_degree = (np.bincount(ei[0], minlength=n_nodes) +
+                       np.bincount(ei[1], minlength=n_nodes))
+    deg_sq_sum = float((baseline_degree.astype(np.float64) ** 2).sum())
+    deg_sum = float(baseline_degree.sum())
     baseline_degree_std = float(baseline_degree.std())
 
     # Select target edges (prefer malicious-labeled edges)
     if target_edge_indices is not None:
-        targets = target_edge_indices[:max_removals]
+        targets = np.asarray(target_edge_indices[:max_removals])
     elif labels is not None:
-        mal_mask = labels == 1
-        mal_idx = np.where(mal_mask)[0]
+        mal_idx = np.where(labels == 1)[0]
         if len(mal_idx) > 0:
-            # Sort by edge feature magnitude (total_bytes) descending
-            magnitudes = ea[mal_idx, 1] if ea.shape[1] > 1 else ea[mal_idx, 0]
-            top_order = np.argsort(-magnitudes)
-            targets = mal_idx[top_order[:max_removals]].tolist()
+            magnitudes = ea[mal_idx, min(1, ea.shape[1] - 1)]
+            targets = mal_idx[np.argsort(-magnitudes)[:max_removals]]
         else:
-            # No malicious edges; pick edges with highest total_bytes
-            magnitudes = ea[:, 1] if ea.shape[1] > 1 else ea[:, 0]
-            top_order = np.argsort(-magnitudes)
-            targets = top_order[:max_removals].tolist()
+            magnitudes = ea[:, min(1, ea.shape[1] - 1)]
+            targets = np.argsort(-magnitudes)[:max_removals]
     else:
-        targets = list(range(min(max_removals, n_edges)))
+        targets = np.arange(min(max_removals, n_edges))
+
+    targets = np.asarray(targets)
+    n_targets = len(targets)
+    n_new = n_edges - 1
 
     feat_names = ["packet_count", "total_bytes", "mean_payload", "mean_iat", "std_iat"]
+
+    # ── Batch feature impact: (T, F) matrix computed in one operation ──
+    target_feats = ea[targets]  # (T, F)
+    new_means = (baseline_sum[np.newaxis, :] - target_feats) / n_new
+    deltas = new_means - baseline_mean[np.newaxis, :]
+    abs_baseline = np.abs(baseline_mean).copy()
+    abs_baseline[abs_baseline < 1e-9] = 1e-9
+    pct_changes = np.abs(deltas) / abs_baseline[np.newaxis, :] * 100
+
+    # ── Batch structural impact via sum-of-squares update formula ──
+    # Removing edge i decrements degree[src[i]] and degree[dst[i]] by 1.
+    # new_deg_sq_sum = old - old_s² - old_d² + (old_s-1)² + (old_d-1)²
+    t_src = ei[0, targets]
+    t_dst = ei[1, targets]
+    old_s = baseline_degree[t_src].astype(np.float64)
+    old_d = baseline_degree[t_dst].astype(np.float64)
+    self_loop = t_src == t_dst
+
+    new_deg_sq = np.where(
+        self_loop,
+        deg_sq_sum - old_s ** 2 + (old_s - 2) ** 2,
+        deg_sq_sum - old_s ** 2 - old_d ** 2 + (old_s - 1) ** 2 + (old_d - 1) ** 2,
+    )
+    new_deg_sum = deg_sum - 2  # removing one edge always decrements total degree by 2
+    new_mean_deg = new_deg_sum / n_nodes
+    new_var = np.maximum(new_deg_sq / n_nodes - new_mean_deg ** 2, 0.0)
+    new_std = np.sqrt(new_var)
+    structural_impacts = np.abs(new_std - baseline_degree_std) / max(baseline_degree_std, 1e-9)
+
+    # ── Build result dicts (output assembly) ──
     results = []
-
-    for edge_idx in targets:
-        # Remove this edge and recompute stats
-        keep_mask = np.ones(n_edges, dtype=bool)
-        keep_mask[edge_idx] = False
-        new_ea = ea[keep_mask]
-
-        if len(new_ea) == 0:
-            continue
-
-        new_mean = new_ea.mean(axis=0)
-        delta = new_mean - baseline_mean
-
-        new_ei = ei[:, keep_mask]
-        new_degree = np.bincount(new_ei[0], minlength=graph.num_nodes) + \
-                     np.bincount(new_ei[1], minlength=graph.num_nodes)
-        new_degree_std = float(new_degree.std())
-
+    for t in range(n_targets):
+        edge_idx = int(targets[t])
         feature_impact = {}
         for j, fname in enumerate(feat_names[:ea.shape[1]]):
             feature_impact[fname] = {
-                "delta": round(float(delta[j]), 4),
-                "pct_change": round(
-                    abs(float(delta[j])) / max(abs(float(baseline_mean[j])), 1e-9) * 100, 2
-                ),
+                "delta": round(float(deltas[t, j]), 4),
+                "pct_change": round(float(pct_changes[t, j]), 2),
             }
-
-        structural_impact = abs(new_degree_std - baseline_degree_std) / max(baseline_degree_std, 1e-9)
-
         results.append({
-            "edge_idx": int(edge_idx),
+            "edge_idx": edge_idx,
             "src": int(ei[0, edge_idx]),
             "dst": int(ei[1, edge_idx]),
             "removed_label": int(labels[edge_idx]) if labels is not None else 0,
@@ -528,7 +545,7 @@ def edge_perturbation_counterfactual(
                 for j, fname in enumerate(feat_names[:ea.shape[1]])
             },
             "feature_impact": feature_impact,
-            "structural_impact": round(float(structural_impact), 4),
+            "structural_impact": round(float(structural_impacts[t]), 4),
         })
 
     # Sort by structural impact descending
@@ -559,20 +576,24 @@ def compare_graph_windows(
 
     feat_names = ["packet_count", "total_bytes", "mean_payload", "mean_iat", "std_iat"]
 
-    # Feature-level comparison
+    # Vectorised feature-level comparison
     feature_diffs = {}
     if ea_a is not None and ea_b is not None:
-        mean_a = ea_a.mean(axis=0)
-        mean_b = ea_b.mean(axis=0)
-        for j, fname in enumerate(feat_names[:min(ea_a.shape[1], ea_b.shape[1])]):
-            diff = float(mean_b[j] - mean_a[j])
-            pct = abs(diff) / max(abs(float(mean_a[j])), 1e-9) * 100
-            feature_diffs[fname] = {
+        n_feats = min(ea_a.shape[1], ea_b.shape[1], len(feat_names))
+        mean_a = ea_a[:, :n_feats].mean(axis=0)
+        mean_b = ea_b[:, :n_feats].mean(axis=0)
+        delta_arr = mean_b - mean_a
+        abs_mean_a = np.abs(mean_a)
+        abs_mean_a[abs_mean_a < 1e-9] = 1e-9
+        pct_arr = np.abs(delta_arr) / abs_mean_a * 100
+        for j in range(n_feats):
+            d = float(delta_arr[j])
+            feature_diffs[feat_names[j]] = {
                 "window_a_mean": round(float(mean_a[j]), 4),
                 "window_b_mean": round(float(mean_b[j]), 4),
-                "delta": round(diff, 4),
-                "pct_change": round(pct, 2),
-                "direction": "increase" if diff > 0 else "decrease" if diff < 0 else "unchanged",
+                "delta": round(d, 4),
+                "pct_change": round(float(pct_arr[j]), 2),
+                "direction": "increase" if d > 0 else "decrease" if d < 0 else "unchanged",
             }
 
     # Degree distribution shift
@@ -622,33 +643,29 @@ def find_most_anomalous_window(
 ) -> tuple[int, Data, dict]:
     """Find the graph window with the highest proportion of malicious edges.
 
+    Vectorised: computes all malicious ratios in one pass via numpy,
+    then selects the argmax.
+
     Returns (window_index, graph, stats_dict).
     """
     if not graphs:
         raise ValueError("No graphs provided")
 
-    best_idx = 0
-    best_score = -1.0
-    stats_list = []
+    # Vectorised: extract labels from all graphs and compute ratios in batch
+    ys = [g.y.cpu().numpy() if g.y is not None else np.zeros(g.edge_index.shape[1]) for g in graphs]
+    n_edges = np.array([len(y) for y in ys])
+    n_mal = np.array([int((y == 1).sum()) for y in ys])
+    ratios = n_mal / np.maximum(n_edges, 1)
 
-    for i, g in enumerate(graphs):
-        y = g.y.cpu().numpy() if g.y is not None else np.zeros(g.edge_index.shape[1])
-        n_edges = len(y)
-        n_mal = int((y == 1).sum())
-        ratio = n_mal / max(n_edges, 1)
-        stats = {
-            "window_index": i,
-            "window_start": float(getattr(g, "window_start", 0)),
-            "num_edges": n_edges,
-            "num_malicious": n_mal,
-            "malicious_ratio": round(ratio, 4),
-        }
-        stats_list.append(stats)
-        if ratio > best_score:
-            best_score = ratio
-            best_idx = i
-
-    return best_idx, graphs[best_idx], stats_list[best_idx]
+    best_idx = int(np.argmax(ratios))
+    stats = {
+        "window_index": best_idx,
+        "window_start": float(getattr(graphs[best_idx], "window_start", 0)),
+        "num_edges": int(n_edges[best_idx]),
+        "num_malicious": int(n_mal[best_idx]),
+        "malicious_ratio": round(float(ratios[best_idx]), 4),
+    }
+    return best_idx, graphs[best_idx], stats
 
 
 def find_most_normal_window(
@@ -656,30 +673,26 @@ def find_most_normal_window(
 ) -> tuple[int, Data, dict]:
     """Find the graph window with the lowest proportion of malicious edges.
 
+    Vectorised: computes all malicious ratios in one pass via numpy,
+    then selects the argmin.
+
     Returns (window_index, graph, stats_dict).
     """
     if not graphs:
         raise ValueError("No graphs provided")
 
-    best_idx = 0
-    best_score = 2.0  # > 1.0 so any ratio wins
+    # Vectorised: extract labels from all graphs and compute ratios in batch
+    ys = [g.y.cpu().numpy() if g.y is not None else np.zeros(g.edge_index.shape[1]) for g in graphs]
+    n_edges = np.array([len(y) for y in ys])
+    n_mal = np.array([int((y == 1).sum()) for y in ys])
+    ratios = n_mal / np.maximum(n_edges, 1)
 
-    for i, g in enumerate(graphs):
-        y = g.y.cpu().numpy() if g.y is not None else np.zeros(g.edge_index.shape[1])
-        n_edges = len(y)
-        n_mal = int((y == 1).sum())
-        ratio = n_mal / max(n_edges, 1)
-        if ratio < best_score:
-            best_score = ratio
-            best_idx = i
-
-    g = graphs[best_idx]
-    y = g.y.cpu().numpy() if g.y is not None else np.zeros(g.edge_index.shape[1])
+    best_idx = int(np.argmin(ratios))
     stats = {
         "window_index": best_idx,
-        "window_start": float(getattr(g, "window_start", 0)),
-        "num_edges": len(y),
-        "num_malicious": int((y == 1).sum()),
-        "malicious_ratio": round(best_score, 4),
+        "window_start": float(getattr(graphs[best_idx], "window_start", 0)),
+        "num_edges": int(n_edges[best_idx]),
+        "num_malicious": int(n_mal[best_idx]),
+        "malicious_ratio": round(float(ratios[best_idx]), 4),
     }
     return best_idx, graphs[best_idx], stats
