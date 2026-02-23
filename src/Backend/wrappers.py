@@ -281,8 +281,8 @@ def _flow_id(window_id: int, src: str, dst: str, edge_idx: int) -> str:
 
 def _flow_ids_batch(
     window_id: int,
-    src_ips: np.ndarray,
-    dst_ips: np.ndarray,
+    src_ips: list[str] | np.ndarray,
+    dst_ips: list[str] | np.ndarray,
     n: int,
 ) -> list[str]:
     """Batch flow-ID generation (avoids per-edge function-call overhead).
@@ -355,17 +355,30 @@ def index_pyg_graph(
     n_edges = edge_index.shape[1]
     feature_names = ["packet_count", "total_bytes", "mean_payload", "mean_iat", "std_iat"]
 
-    # ── Batch IP lookup ──
+    # ── Batch IP lookup (keep as Python lists — faster per-element access) ──
     src_ids = edge_index[0]
     dst_ids = edge_index[1]
-    src_ips = np.array([node_id_to_ip.get(int(s), f"0.0.0.{s}") for s in src_ids])
-    dst_ips = np.array([node_id_to_ip.get(int(d), f"0.0.0.{d}") for d in dst_ids])
+    src_ips = [node_id_to_ip.get(int(s), f"0.0.0.{s}") for s in src_ids]
+    dst_ips = [node_id_to_ip.get(int(d), f"0.0.0.{d}") for d in dst_ids]
 
     # ── Batch flow-ID generation ──
     flow_ids = _flow_ids_batch(wid, src_ips, dst_ips, n_edges)
 
-    # ── Build docs in bulk ──
+    # ── Pre-convert numpy arrays to Python lists (single C-level call
+    #    avoids per-element numpy→Python coercion in the doc loop) ──
     ts_now = int(time.time() * 1000)
+    labels_list = labels.tolist() if labels is not None else None
+    preds_list = preds.tolist() if preds is not None else None
+    scores_list = scores.tolist() if scores is not None else None
+
+    # Pre-extract edge_attr columns as Python lists
+    feat_lists: dict[str, list[float]] | None = None
+    if edge_attr is not None and edge_attr.shape[1] >= len(feature_names):
+        feat_lists = {
+            fname: edge_attr[:, j].tolist()
+            for j, fname in enumerate(feature_names)
+        }
+
     actions = []
     for i in range(n_edges):
         doc: dict[str, Any] = {
@@ -374,16 +387,16 @@ def index_pyg_graph(
             "window_start": w_start,
             "src_ip": src_ips[i],
             "dst_ip": dst_ips[i],
-            "label": int(labels[i]) if labels is not None else 0,
+            "label": labels_list[i] if labels_list is not None else 0,
             "timestamp": ts_now,
         }
-        if edge_attr is not None and edge_attr.shape[1] >= len(feature_names):
-            for j, fname in enumerate(feature_names):
-                doc[fname] = float(edge_attr[i, j])
-        if preds is not None:
-            doc["prediction"] = int(preds[i])
-        if scores is not None:
-            doc["prediction_score"] = float(scores[i])
+        if feat_lists is not None:
+            for fname, fvals in feat_lists.items():
+                doc[fname] = fvals[i]
+        if preds_list is not None:
+            doc["prediction"] = preds_list[i]
+        if scores_list is not None:
+            doc["prediction_score"] = scores_list[i]
         actions.append({"_index": FLOWS_INDEX, "_id": flow_ids[i], "_source": doc})
 
     success, errors = helpers.bulk(es, actions, chunk_size=batch_size, raise_on_error=False)
@@ -627,8 +640,8 @@ def generate_embeddings(
 
         src_ids = ei[0]
         dst_ids = ei[1]
-        src_ips = np.array([id_to_ip.get(int(s), f"0.0.0.{s}") for s in src_ids])
-        dst_ips = np.array([id_to_ip.get(int(d), f"0.0.0.{d}") for d in dst_ids])
+        src_ips = [id_to_ip.get(int(s), f"0.0.0.{s}") for s in src_ids]
+        dst_ips = [id_to_ip.get(int(d), f"0.0.0.{d}") for d in dst_ids]
         fids = _flow_ids_batch(wid, src_ips, dst_ips, n_edges)
 
         fid_chunks.append(fids)
@@ -744,12 +757,15 @@ def index_embeddings(
     if isinstance(embeddings, torch.Tensor):
         embeddings = embeddings.cpu().numpy()
 
+    # Single C-level conversion: avoids N separate .tolist() calls
+    emb_lists = embeddings.tolist()
+
     actions = []
     for i, fid in enumerate(flow_ids):
         doc: dict[str, Any] = {
             "flow_id": fid,
             "label": int(labels[i]),
-            "embedding": embeddings[i].tolist(),
+            "embedding": emb_lists[i],
         }
         if extra_fields and i < len(extra_fields):
             doc.update(extra_fields[i])

@@ -383,26 +383,14 @@ def collate_temporal_batch(
     labels = torch.cat([seq[-1].y for seq in batch])
 
     if device is not None:
-        moved: list[list[Data]] = []
-        for seq in batch:
-            moved_seq: list[Data] = []
-            for g in seq:
-                g = g.clone()
-                g.x = g.x.to(device)
-                g.edge_index = g.edge_index.to(device)
-                g.edge_attr = g.edge_attr.to(device)
-                if g.y is not None:
-                    g.y = g.y.to(device)
-                if hasattr(g, "norm") and g.norm is not None:
-                    g.norm = g.norm.to(device)
-                if (
-                    hasattr(g, "edge_index_with_loops")
-                    and g.edge_index_with_loops is not None
-                ):
-                    g.edge_index_with_loops = g.edge_index_with_loops.to(device)
-                moved_seq.append(g)
-            moved.append(moved_seq)
-        batch = moved
+        # Use PyG Data.to(device) — moves ALL tensor attributes (x,
+        # edge_index, edge_attr, y, norm, edge_index_with_loops, etc.)
+        # in a single call, avoiding manual per-attribute transfers and
+        # the risk of missing newly-added tensor attributes.
+        batch = [
+            [g.clone().to(device) for g in seq]
+            for seq in batch
+        ]
         labels = labels.to(device)
 
     return batch, labels

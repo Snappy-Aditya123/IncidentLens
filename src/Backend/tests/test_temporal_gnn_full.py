@@ -15,7 +15,8 @@ import torch.nn as nn
 import numpy as np
 from torch_geometric.data import Data
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Project root (3 levels up: tests/ -> Backend/ -> src/ -> IncidentLens/)
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 from src.Backend.temporal_gnn import (
     EvolvingGNN,
     EvolvingGCNLayer,

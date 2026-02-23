@@ -41,7 +41,9 @@ from src.Backend.agent_tools import set_graph_cache
 
 logger = logging.getLogger(__name__)
 
-DATA_DIR = str(Path(__file__).resolve().parent / "data")
+# Project root: IncidentLens/ (3 levels up from src/Backend/ingest_pipeline.py)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+DATA_DIR = str(_PROJECT_ROOT / "data")
 
 
 # ===================================================================

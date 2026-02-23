@@ -1,15 +1,16 @@
 """Run all test modules and print a final summary."""
 import os, sys, unittest
 
-# Ensure project root is on path
-root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Ensure project root is on path so src.Backend.* imports resolve
+root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 os.chdir(root)
-sys.path.insert(0, root)
+if root not in sys.path:
+    sys.path.insert(0, root)
 
 loader = unittest.TestLoader()
 suite = unittest.TestSuite()
-suite.addTests(loader.loadTestsFromName("tests.test_temporal_gnn_full"))
-suite.addTests(loader.loadTestsFromName("tests.test_temporal_gnn_meticulous"))
+suite.addTests(loader.loadTestsFromName("src.Backend.tests.test_temporal_gnn_full"))
+suite.addTests(loader.loadTestsFromName("src.Backend.tests.test_temporal_gnn_meticulous"))
 
 runner = unittest.TextTestRunner(verbosity=0)
 result = runner.run(suite)

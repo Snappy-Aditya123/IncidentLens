@@ -6,6 +6,9 @@ Run:  python -m pytest test_gnn_edge_cases.py -v
 """
 
 import sys, os
+# Project root (3 levels up: tests/ -> Backend/ -> src/ -> IncidentLens/)
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
+
 import numpy as np
 import pandas as pd
 import torch

@@ -184,12 +184,12 @@ def evaluate(model, loader, criterion, device, threshold=0.5):
         for batch in loader:
             batch = batch.to(device)
 
-            # Ensure finite tensors at runtime as an extra guard
-            batch.x = tensor_make_finite_(batch.x)
-            batch.edge_attr = tensor_make_finite_(batch.edge_attr)
+            # NOTE: batch.x and batch.edge_attr are already sanitized by
+            # sanitize_graphs_inplace() at data-prep time — skipping
+            # redundant tensor_make_finite_ here saves a tensor copy per batch.
 
             logits = model(batch)
-            logits = tensor_make_finite_(logits)
+            logits = tensor_make_finite_(logits)  # model output may have NaN
 
             loss = criterion(logits, batch.y.float())
             total_loss += loss.item()
@@ -301,13 +301,12 @@ def train_edge_gnn(
         for batch_idx, batch in enumerate(loader, start=1):
             batch = batch.to(device)
 
-            batch.x = tensor_make_finite_(batch.x)
-            batch.edge_attr = tensor_make_finite_(batch.edge_attr)
+            # batch.x / edge_attr already sanitized at data-prep time
 
             optimizer.zero_grad()
 
             logits = model(batch)
-            logits = tensor_make_finite_(logits)
+            logits = tensor_make_finite_(logits)  # model output may have NaN
 
             loss = criterion(logits, batch.y.float())
 

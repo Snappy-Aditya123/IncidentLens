@@ -30,9 +30,12 @@ import pandas as pd
 # Defaults — paths relative to workspace
 # ──────────────────────────────────────────────
 
+# Project root: IncidentLens/ (3 levels up from src/Backend/csv_to_json.py)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
 _DATA_ROOT = Path(os.environ.get(
     "INCIDENTLENS_DATA_ROOT",
-    str(Path(__file__).resolve().parent / "data"),
+    str(_PROJECT_ROOT / "data"),
 ))
 DEFAULT_PACKETS_CSV = os.environ.get(
     "INCIDENTLENS_PACKETS_CSV",
@@ -42,7 +45,7 @@ DEFAULT_LABELS_CSV = os.environ.get(
     "INCIDENTLENS_LABELS_CSV",
     str(_DATA_ROOT / "SSDP_Flood_labels.csv"),
 )
-DEFAULT_OUTDIR = str(Path(__file__).resolve().parent / "data")
+DEFAULT_OUTDIR = str(_PROJECT_ROOT / "data")
 DEFAULT_CHUNK_SIZE = 100_000
 
 

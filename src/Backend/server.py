@@ -96,14 +96,15 @@ class CounterfactualRequest(BaseModel):
 async def health():
     """Server + Elasticsearch health."""
     try:
-        es_health = wrappers.health_check()
+        es = wrappers.get_client()
+        es_health = wrappers.health_check(es)
         return {
             "server": "ok",
             "elasticsearch": es_health["status"],
             "indices": {
-                "flows": wrappers.get_client().indices.exists(index=wrappers.FLOWS_INDEX),
-                "embeddings": wrappers.get_client().indices.exists(index=wrappers.EMBEDDINGS_INDEX),
-                "counterfactuals": wrappers.get_client().indices.exists(index=wrappers.COUNTERFACTUALS_INDEX),
+                "flows": es.indices.exists(index=wrappers.FLOWS_INDEX),
+                "embeddings": es.indices.exists(index=wrappers.EMBEDDINGS_INDEX),
+                "counterfactuals": es.indices.exists(index=wrappers.COUNTERFACTUALS_INDEX),
             },
         }
     except Exception as e:

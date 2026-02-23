@@ -114,7 +114,7 @@ def cmd_serve(args):
     print(f"  Health:     http://localhost:{args.port}/health")
     print(f"  ES backend: http://localhost:9200")
     uvicorn.run(
-        "server:app",
+        "src.Backend.server:app",
         host="0.0.0.0",
         port=args.port,
         reload=args.reload,
@@ -152,7 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # --- ingest ---
     p_ingest = sub.add_parser("ingest", help="Run data ingestion + analysis pipeline")
-    p_ingest.add_argument("--data-dir", default=str(Path(__file__).resolve().parent / "data"))
+    p_ingest.add_argument("--data-dir", default=str(Path(__file__).resolve().parent.parent / "data"))
     p_ingest.add_argument("--max-rows", type=int, default=None)
     p_ingest.add_argument("--skip-graphs", action="store_true")
     p_ingest.add_argument("--skip-raw", action="store_true")
@@ -175,7 +175,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_conv = sub.add_parser("convert", help="Convert CSV -> NDJSON")
     p_conv.add_argument("--packets", default=None, help="Path to ssdp_packets_rich.csv")
     p_conv.add_argument("--labels", default=None, help="Path to SSDP_Flood_labels.csv")
-    p_conv.add_argument("--outdir", default=str(Path(__file__).resolve().parent / "data"))
+    p_conv.add_argument("--outdir", default=str(Path(__file__).resolve().parent.parent / "data"))
     p_conv.add_argument("--chunk-size", type=int, default=100_000)
     p_conv.add_argument("--max-rows", type=int, default=None)
 
