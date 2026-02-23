@@ -203,6 +203,142 @@ async def list_tools():
 
 
 # ──────────────────────────────────────────────
+# Incident-oriented endpoints (frontend convenience)
+# ──────────────────────────────────────────────
+
+def _flow_to_incident(flow: dict) -> dict:
+    """Map a raw ES flow doc to a frontend Incident shape."""
+    score = flow.get("prediction_score", 0.85 if flow.get("label") == 1 else 0.2)
+    if score > 0.9:
+        severity = "critical"
+    elif score > 0.7:
+        severity = "high"
+    elif score > 0.5:
+        severity = "medium"
+    else:
+        severity = "low"
+
+    src = flow.get("src_ip", "unknown")
+    dst = flow.get("dst_ip", "unknown")
+    return {
+        "id": flow.get("_id", ""),
+        "title": f"Anomalous Flow: {src} → {dst}",
+        "severity": severity,
+        "status": "investigating",
+        "timestamp": flow.get("@timestamp", flow.get("timestamp", "")),
+        "affectedSystems": [ip for ip in [src, dst] if ip != "unknown"],
+        "description": (
+            f"Detected anomalous traffic — {flow.get('packet_count', '?')} packets, "
+            f"{flow.get('total_bytes', '?')} bytes. "
+            f"Score: {round(score * 100)}%."
+        ),
+        "anomalyScore": score,
+    }
+
+
+@app.get("/api/incidents")
+async def list_incidents(size: int = Query(50)):
+    """Return anomalous flows shaped as frontend Incident objects."""
+    result_str = agent_tools.dispatch("detect_anomalies", {
+        "method": "label", "size": size,
+    })
+    data = json.loads(result_str)
+    incidents = [_flow_to_incident(f) for f in data.get("flows", [])]
+    return {"count": len(incidents), "incidents": incidents}
+
+
+@app.get("/api/incidents/{incident_id}")
+async def get_incident(incident_id: str):
+    """Return a single incident by flow ID."""
+    result_str = agent_tools.dispatch("get_flow", {"flow_id": incident_id})
+    flow = json.loads(result_str)
+    if "error" in flow:
+        return JSONResponse(status_code=404, content=flow)
+    flow["_id"] = incident_id
+    return _flow_to_incident(flow)
+
+
+@app.get("/api/incidents/{incident_id}/graph")
+async def incident_graph(incident_id: str, size: int = Query(30)):
+    """Build a network graph from anomalous flows for the D3 visualisation."""
+    result_str = agent_tools.dispatch("detect_anomalies", {
+        "method": "label", "size": size,
+    })
+    data = json.loads(result_str)
+    flows = data.get("flows", [])
+
+    # Build node + edge sets
+    node_map: dict[str, dict[str, Any]] = {}
+    edges: list[dict[str, Any]] = []
+
+    for f in flows:
+        src, dst = f.get("src_ip"), f.get("dst_ip")
+        score = f.get("prediction_score", 0.8 if f.get("label") == 1 else 0.15)
+        for ip in (src, dst):
+            if ip:
+                prev = node_map.get(ip, {"risk": 0, "label": 0})
+                node_map[ip] = {
+                    "risk": max(prev["risk"], score),
+                    "label": max(prev["label"], f.get("label", 0)),
+                }
+        if src and dst:
+            edges.append({
+                "source": src,
+                "target": dst,
+                "type": "data_flow",
+                "weight": min((f.get("packet_count", 1) or 1) / 100, 10),
+                "anomalous": f.get("label", 0) == 1,
+            })
+
+    nodes = []
+    for ip, info in node_map.items():
+        status = "compromised" if info["risk"] > 0.8 else "suspicious" if info["risk"] > 0.5 else "normal"
+        nodes.append({
+            "id": ip,
+            "label": ip,
+            "type": "server",
+            "status": status,
+            "risk": round(info["risk"], 3),
+        })
+
+    return {"nodes": nodes, "edges": edges}
+
+
+@app.get("/api/incidents/{incident_id}/logs")
+async def incident_logs(incident_id: str, size: int = Query(20)):
+    """Return ES-style log entries for the frontend log viewer."""
+    import datetime
+
+    result_str = agent_tools.dispatch("search_flows", {"size": size})
+    data = json.loads(result_str)
+    flows = data.get("flows", [])
+
+    logs = []
+    for f in flows[:size]:
+        logs.append({
+            "timestamp": f.get("@timestamp", datetime.datetime.utcnow().isoformat() + "Z"),
+            "source": f.get("src_ip", "unknown"),
+            "message": (
+                f"Flow {f.get('src_ip', '?')} → {f.get('dst_ip', '?')}: "
+                f"{f.get('packet_count', 0)} pkts, {f.get('total_bytes', 0)} bytes"
+                + (" [ANOMALOUS]" if f.get("label") == 1 else "")
+            ),
+            "level": "CRITICAL" if f.get("label") == 1 else "INFO",
+        })
+
+    return {
+        "totalHits": data.get("count", len(logs)),
+        "logs": logs,
+        "query": {
+            "bool": {
+                "must": [{"term": {"label": 1}}],
+                "filter": [{"range": {"@timestamp": {"gte": "now-1h"}}}],
+            }
+        },
+    }
+
+
+# ──────────────────────────────────────────────
 # WebSocket endpoint (real-time streaming)
 # ──────────────────────────────────────────────
 

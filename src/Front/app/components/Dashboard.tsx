@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { Link } from 'react-router';
-import { mockIncidents } from '../data/mockData';
+import { useIncidents } from '../hooks/useApi';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
+import { Skeleton } from './ui/skeleton';
 import { 
   AlertTriangle, 
   Search, 
@@ -13,21 +14,27 @@ import {
   TrendingUp,
   Clock,
   Database,
-  Network
+  Network,
+  RefreshCw
 } from 'lucide-react';
 import { format } from 'date-fns';
 
 export function Dashboard() {
   const [searchQuery, setSearchQuery] = useState('');
+  const { data: incidents, loading, error, refetch } = useIncidents();
 
-  const filteredIncidents = mockIncidents.filter(incident =>
+  const allIncidents = incidents ?? [];
+
+  const filteredIncidents = allIncidents.filter(incident =>
     incident.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
     incident.id.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  const criticalCount = mockIncidents.filter(i => i.severity === 'critical').length;
-  const activeCount = mockIncidents.filter(i => i.status === 'investigating').length;
-  const avgAnomalyScore = (mockIncidents.reduce((sum, i) => sum + i.anomalyScore, 0) / mockIncidents.length).toFixed(2);
+  const criticalCount = allIncidents.filter(i => i.severity === 'critical').length;
+  const activeCount = allIncidents.filter(i => i.status === 'investigating').length;
+  const avgAnomalyScore = allIncidents.length
+    ? (allIncidents.reduce((sum, i) => sum + i.anomalyScore, 0) / allIncidents.length).toFixed(2)
+    : '0.00';
 
   const getSeverityColor = (severity: string) => {
     switch (severity) {
@@ -63,11 +70,22 @@ export function Dashboard() {
                 <p className="text-sm text-slate-400">AI-Powered Network Investigation</p>
               </div>
             </div>
-            <div className="flex items-center gap-2">
-              <Clock className="w-4 h-4 text-slate-400" />
-              <span className="text-sm text-slate-400">
-                {format(new Date(), 'PPpp')}
-              </span>
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2">
+                <Clock className="w-4 h-4 text-slate-400" />
+                <span className="text-sm text-slate-400">
+                  {format(new Date(), 'PPpp')}
+                </span>
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-slate-400 hover:text-slate-200"
+                onClick={refetch}
+                disabled={loading}
+              >
+                <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+              </Button>
             </div>
           </div>
         </div>
@@ -115,7 +133,7 @@ export function Dashboard() {
               <Database className="w-4 h-4 text-blue-400" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl text-slate-100">{mockIncidents.length}</div>
+              <div className="text-2xl text-slate-100">{allIncidents.length}</div>
               <p className="text-xs text-slate-500 mt-1">Last 24 hours</p>
             </CardContent>
           </Card>
@@ -142,7 +160,35 @@ export function Dashboard() {
           </CardContent>
         </Card>
 
+        {/* Error banner */}
+        {error && (
+          <Card className="mb-6 bg-red-500/10 border-red-500/30">
+            <CardContent className="py-4">
+              <div className="flex items-center gap-3 text-red-400">
+                <AlertTriangle className="w-5 h-5 flex-shrink-0" />
+                <span className="text-sm">Backend unavailable — showing cached/mock data. {error}</span>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Loading skeleton */}
+        {loading && (
+          <div className="space-y-4 mb-6">
+            {[1, 2, 3].map((i) => (
+              <Card key={i} className="bg-slate-900 border-slate-800">
+                <CardContent className="py-6">
+                  <Skeleton className="h-5 w-2/3 mb-3 bg-slate-800" />
+                  <Skeleton className="h-4 w-1/2 mb-2 bg-slate-800" />
+                  <Skeleton className="h-3 w-1/3 bg-slate-800" />
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        )}
+
         {/* Incidents List */}
+        {!loading && (
         <div className="space-y-4">
           {filteredIncidents.map((incident) => (
             <Card key={incident.id} className="bg-slate-900 border-slate-800 hover:border-slate-700 transition-colors">
@@ -198,8 +244,9 @@ export function Dashboard() {
             </Card>
           ))}
         </div>
+        )}
 
-        {filteredIncidents.length === 0 && (
+        {!loading && filteredIncidents.length === 0 && (
           <Card className="bg-slate-900 border-slate-800">
             <CardContent className="py-12">
               <div className="text-center text-slate-400">

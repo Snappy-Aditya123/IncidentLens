@@ -16,16 +16,24 @@ venv/
 .ipynb_checkpoints/
 
 # =========================
-# Data (VERY IMPORTANT)
+# Data (raw / large files)
 # =========================
-data/
-datasets/
+# Ignore large raw datasets but NOT app source code in data/ folders
 *.csv
 *.csv.gz
 *.pcap
 *.pcapng
 *.gz
 *.zip
+datasets/
+
+# =========================
+# Node / Frontend
+# =========================
+node_modules/
+dist/
+.turbo/
+.next/
 
 # =========================
 # Large files

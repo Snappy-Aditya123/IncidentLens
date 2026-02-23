@@ -1,0 +1,26 @@
+{
+  "source": "SSDP_Flood test subset",
+  "total_rows": 10000,
+  "chunk_size": 10000,
+  "num_files": 1,
+  "files": [
+    "packets_0000.json"
+  ],
+  "columns": [
+    "packet_index",
+    "timestamp",
+    "inter_arrival_time",
+    "src_ip",
+    "dst_ip",
+    "src_port",
+    "dst_port",
+    "protocol",
+    "ttl",
+    "ip_header_len",
+    "tcp_flags",
+    "udp_length",
+    "payload_length",
+    "packet_length",
+    "label"
+  ]
+}

@@ -1,10 +1,9 @@
 import { useState } from 'react';
 import { useParams, Link } from 'react-router';
-import { mockIncidents, mockElasticsearchResults, mockNetworkGraph, mockCounterfactuals } from '../data/mockData';
+import { useIncident, useElasticsearchData, useNetworkGraph, useCounterfactual } from '../hooks/useApi';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Progress } from './ui/progress';
 import { Separator } from './ui/separator';
 import { 
@@ -15,7 +14,8 @@ import {
   ChevronRight,
   CheckCircle2,
   Clock,
-  AlertCircle
+  AlertCircle,
+  Loader2
 } from 'lucide-react';
 import { ElasticsearchStep } from './investigation/ElasticsearchStep';
 import { GNNStep } from './investigation/GNNStep';
@@ -28,10 +28,21 @@ export function Investigation() {
   const { incidentId } = useParams();
   const [currentStep, setCurrentStep] = useState<InvestigationStep>('overview');
   
-  const incident = mockIncidents.find(i => i.id === incidentId);
-  const elasticsearchData = incidentId ? mockElasticsearchResults[incidentId as keyof typeof mockElasticsearchResults] : null;
-  const networkGraph = incidentId ? mockNetworkGraph[incidentId as keyof typeof mockNetworkGraph] : null;
-  const counterfactual = incidentId ? mockCounterfactuals[incidentId as keyof typeof mockCounterfactuals] : null;
+  const { data: incident, loading: incidentLoading } = useIncident(incidentId);
+  const { data: elasticsearchData, loading: esLoading } = useElasticsearchData(incidentId);
+  const { data: networkGraph, loading: graphLoading } = useNetworkGraph(incidentId);
+  const { data: counterfactual, loading: cfLoading } = useCounterfactual(incidentId);
+
+  if (incidentLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-950">
+        <div className="flex flex-col items-center gap-4">
+          <Loader2 className="w-10 h-10 text-blue-400 animate-spin" />
+          <p className="text-slate-400">Loading investigation…</p>
+        </div>
+      </div>
+    );
+  }
 
   if (!incident) {
     return (
@@ -236,24 +247,60 @@ export function Investigation() {
           </div>
         )}
 
-        {currentStep === 'elasticsearch' && elasticsearchData && (
-          <ElasticsearchStep 
-            data={elasticsearchData} 
-            onNext={() => setCurrentStep('gnn')}
-          />
+        {currentStep === 'elasticsearch' && (
+          esLoading ? (
+            <StepLoading label="Loading Elasticsearch data…" />
+          ) : elasticsearchData ? (
+            <ElasticsearchStep 
+              data={elasticsearchData} 
+              onNext={() => setCurrentStep('gnn')}
+            />
+          ) : <StepEmpty label="No Elasticsearch data available for this incident." />
         )}
 
-        {currentStep === 'gnn' && networkGraph && (
-          <GNNStep 
-            data={networkGraph}
-            onNext={() => setCurrentStep('counterfactual')}
-          />
+        {currentStep === 'gnn' && (
+          graphLoading ? (
+            <StepLoading label="Building network graph…" />
+          ) : networkGraph ? (
+            <GNNStep 
+              data={networkGraph}
+              onNext={() => setCurrentStep('counterfactual')}
+            />
+          ) : <StepEmpty label="No network graph data available for this incident." />
         )}
 
-        {currentStep === 'counterfactual' && counterfactual && (
-          <CounterfactualStep data={counterfactual} />
+        {currentStep === 'counterfactual' && (
+          cfLoading ? (
+            <StepLoading label="Computing counterfactual explanations…" />
+          ) : counterfactual ? (
+            <CounterfactualStep data={counterfactual} />
+          ) : <StepEmpty label="No counterfactual data available for this incident." />
         )}
       </div>
     </div>
+  );
+}
+
+/* ─── tiny loading/empty helpers ───────────── */
+
+function StepLoading({ label }: { label: string }) {
+  return (
+    <Card className="bg-slate-900 border-slate-800">
+      <CardContent className="py-16 text-center">
+        <Loader2 className="w-10 h-10 mx-auto mb-4 text-blue-400 animate-spin" />
+        <p className="text-slate-400">{label}</p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function StepEmpty({ label }: { label: string }) {
+  return (
+    <Card className="bg-slate-900 border-slate-800">
+      <CardContent className="py-16 text-center">
+        <AlertCircle className="w-10 h-10 mx-auto mb-4 text-slate-500" />
+        <p className="text-slate-400">{label}</p>
+      </CardContent>
+    </Card>
   );
 }
