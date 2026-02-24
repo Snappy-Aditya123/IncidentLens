@@ -47,6 +47,37 @@ DATA_DIR = str(_PROJECT_ROOT / "data")
 
 
 # ===================================================================
+# 0. LOAD PRETRAINED TEMPORAL GNN (if checkpoint exists)
+# ===================================================================
+
+def _try_load_temporal_gnn(checkpoint_path: str | None = None) -> bool:
+    """Attempt to load a pretrained TemporalGNNEncoder and register it.
+
+    Returns True if a model was loaded, False otherwise (falls back to
+    random-projection embeddings).
+    """
+    from src.Backend.temporal_gnn import TemporalGNNEncoder, get_default_checkpoint
+
+    path = Path(checkpoint_path) if checkpoint_path else get_default_checkpoint()
+    if not path.exists():
+        logger.info(
+            "No pretrained GNN checkpoint at %s — using random-projection fallback. "
+            "Run 'python main.py train' to train a model first.",
+            path,
+        )
+        return False
+
+    try:
+        encoder = TemporalGNNEncoder.from_checkpoint(path)
+        wrappers.set_gnn_encoder(encoder)
+        print(f"  [GNN] Loaded pretrained TemporalGNN from {path}")
+        return True
+    except Exception as exc:
+        logger.warning("Failed to load GNN checkpoint %s: %s", path, exc)
+        return False
+
+
+# ===================================================================
 # 1. LOAD NDJSON DATA
 # ===================================================================
 
@@ -393,11 +424,12 @@ def run_pipeline(
 
     Steps:
         1. Load NDJSON data
+        1b. Load pretrained Temporal GNN (if checkpoint exists)
         2. Create ES indices
         3. Index raw packets (optional)
         4. Build temporal graphs
         5. Index aggregated flows
-        6. Generate + index embeddings
+        6. Generate + index embeddings (using GNN if available)
         7. Run counterfactual analysis
         8. Run feature analysis
     """
@@ -410,6 +442,9 @@ def run_pipeline(
     h = wrappers.health_check(es)
     print(f"[OK] ES cluster: {h['status']}")
 
+    # --- 1b. Load pretrained GNN ---
+    has_gnn = _try_load_temporal_gnn()
+
     # --- 1. Load data ---
     print("\n[1/8] Loading NDJSON data ...")
     df = load_ndjson_files(data_dir, max_rows=max_rows)
@@ -417,6 +452,12 @@ def run_pipeline(
 
     # --- 2. Create indices ---
     print("\n[2/8] Setting up ES indices ...")
+    # If a GNN is loaded, use its actual embedding dimension for the ES index
+    if has_gnn:
+        encoder = wrappers.get_gnn_encoder()
+        if encoder is not None:
+            embedding_dim = encoder.embedding_dim
+            print(f"  [GNN] Using GNN embedding dim: {embedding_dim}")
     wrappers.setup_all_indices(es, embedding_dim=embedding_dim, delete_existing=delete_existing)
     setup_raw_packet_index(es, delete_existing=delete_existing)
     print("  Indices ready.")
@@ -440,6 +481,24 @@ def run_pipeline(
         report["num_graphs"] = len(graphs)
         # Populate in-memory graph cache for graph-level CF tools
         set_graph_cache(graphs, id_to_ip)
+
+        # If a GNN is loaded, preload the graph sequence for batch inference
+        if has_gnn:
+            encoder = wrappers.get_gnn_encoder()
+            if hasattr(encoder, "set_graph_sequence"):
+                # Preprocess graphs for the temporal model (sanitize + norm)
+                from src.Backend.temporal_gnn import (
+                    sanitize_graph, recompute_node_features,
+                    preprocess_graphs as preprocess_gnn_graphs,
+                    apply_normalization,
+                )
+                gnn_graphs = [sanitize_graph(g.clone()) for g in graphs]
+                gnn_graphs = [recompute_node_features(g) for g in gnn_graphs]
+                if encoder.norm_stats is not None:
+                    gnn_graphs = apply_normalization(gnn_graphs, encoder.norm_stats)
+                gnn_graphs = preprocess_gnn_graphs(gnn_graphs)
+                encoder.set_graph_sequence(gnn_graphs)
+                print(f"  [GNN] Preloaded {len(gnn_graphs)} graphs for temporal inference")
     else:
         print("\n[4/8] Skipping graph building.")
         report["num_graphs"] = 0

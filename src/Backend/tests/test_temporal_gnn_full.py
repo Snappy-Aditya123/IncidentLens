@@ -1,5 +1,5 @@
 """
-Meticulous test suite for EvolvingGNN v2 (Semi-Temporal GNN).
+Full test suite for EvolvingGNN v2 (Semi-Temporal GNN).
 Covers: correctness, gradient flow, numerical stability, edge cases,
         memory profiling, and timing bottleneck comparison (v1 vs v2).
 """
@@ -518,8 +518,9 @@ class TestPerformanceBottlenecks(unittest.TestCase):
         print(f"  Speedup:                     {mean_raw/mean_pre:.2f}x")
         print("=" * 60)
 
-        # Preprocessed should be at least a little faster
-        # (may not always be measurable for small graphs)
+        # Preprocessed should not be drastically slower than raw
+        self.assertLess(mean_pre, mean_raw * 10,
+                        "Preprocessed path should not be 10x slower than raw")
 
     def test_forward_timing_breakdown(self):
         """Break down time in LSTM vs GNN vs MLP."""
@@ -577,6 +578,11 @@ class TestPerformanceBottlenecks(unittest.TestCase):
         print(f"  >> BOTTLENECK: {bottleneck} ({components[bottleneck]:.2f} ms)")
         print("=" * 60)
 
+        # Each component should run in a reasonable time (<5 seconds)
+        for name, t in components.items():
+            self.assertLess(t, 5000,
+                            f"{name} component took {t:.2f} ms, expected < 5000 ms")
+
     def test_lstm_scaling_with_hidden_dim(self):
         """Verify LSTM no longer scales badly with hidden_dim (flat fix)."""
         print("\n" + "=" * 60)
@@ -592,6 +598,10 @@ class TestPerformanceBottlenecks(unittest.TestCase):
 
         print("  >> Should scale more smoothly than v1")
         print("=" * 60)
+
+        # Forward pass should complete within 5s even at hidden_dim=128
+        self.assertLess(mean_ms, 5000,
+                        f"hidden_dim=128 took {mean_ms:.2f} ms, expected < 5000 ms")
 
     def test_scaling_with_sequence_length(self):
         """Time scales linearly with sequence length."""
@@ -613,6 +623,11 @@ class TestPerformanceBottlenecks(unittest.TestCase):
             ratio = times_by_len[20] / times_by_len[5]
             print(f"  Ratio T=20 / T=5: {ratio:.2f}x (ideal ~4x)")
         print("=" * 60)
+
+        # Scaling should be roughly linear — ratio should be < 10x for 4x input
+        if times_by_len[5] > 0:
+            self.assertLess(ratio, 10,
+                            f"Scaling ratio {ratio:.2f}x is super-linear (expected < 10x)")
 
     def test_memory_usage(self):
         """Track peak memory during forward + backward pass."""
@@ -642,6 +657,10 @@ class TestPerformanceBottlenecks(unittest.TestCase):
         for stat in stats[:5]:
             print(f"    {stat}")
         print("=" * 60)
+
+        # Memory usage for a small graph should stay under 500 MB
+        self.assertLess(total_new_mb, 500,
+                        f"Memory usage {total_new_mb:.2f} MB exceeds 500 MB threshold")
 
 
 # ============================================================

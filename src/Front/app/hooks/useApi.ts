@@ -174,16 +174,16 @@ export function useCounterfactual(incidentId: string | undefined): UseAsyncResul
 }
 
 function backendCfToFrontend(cf: BackendCounterfactualResponse): CounterfactualExplanation {
-  const diffs = cf.diffs ?? [];
+  const diffs = cf.feature_diffs ?? [];
   const maxDiff = Math.max(...diffs.map((d) => d.abs_diff), 1);
 
   return {
     original: `Anomalous flow ${cf.flow_id} — deviates from normal traffic baseline`,
-    counterfactual: `Nearest normal flow — baseline traffic pattern`,
+    counterfactual: `Nearest normal flow ${cf.nearest_normal_id} — baseline traffic pattern`,
     changes: diffs.slice(0, 6).map((d) => ({
       parameter: d.feature,
-      original: String(d.anomalous_value?.toFixed?.(2) ?? d.anomalous_value ?? "N/A"),
-      modified: String(d.normal_value?.toFixed?.(2) ?? d.normal_value ?? "N/A"),
+      original: String(d.original_value?.toFixed?.(2) ?? d.original_value ?? "N/A"),
+      modified: String(d.cf_value?.toFixed?.(2) ?? d.cf_value ?? "N/A"),
       impact: Math.min(d.abs_diff / maxDiff, 1),
     })),
     prediction: {

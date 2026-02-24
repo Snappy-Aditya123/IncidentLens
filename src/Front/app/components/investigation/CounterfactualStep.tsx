@@ -1,15 +1,60 @@
+import { useMemo } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card';
+import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
 import { Separator } from '../ui/separator';
 import { Progress } from '../ui/progress';
-import { Brain, ArrowRight, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Brain, ArrowRight, CheckCircle2, AlertCircle, Home } from 'lucide-react';
 import { CounterfactualExplanation } from '../../data/mockData';
+import { Link } from 'react-router';
 
 interface CounterfactualStepProps {
   data: CounterfactualExplanation;
 }
 
+/** Derive human-readable insights from actual counterfactual changes. */
+function deriveInsights(changes: CounterfactualExplanation['changes']): string[] {
+  if (!changes || changes.length === 0) {
+    return ['No significant feature differences were detected between the anomalous and normal flows.'];
+  }
+
+  const sorted = [...changes].sort((a, b) => b.impact - a.impact);
+  return sorted.slice(0, 4).map((c) => {
+    const pct = (c.impact * 100).toFixed(0);
+    return `**${c.parameter}** changed from ${c.original} → ${c.modified} (${pct}% impact). ` +
+      `${c.impact > 0.7 ? 'This is a primary driver of the anomaly classification.' : 'This contributes to the deviation from normal traffic.'}`;
+  });
+}
+
+/** Derive actionable recommendations from actual counterfactual changes. */
+function deriveRecommendations(changes: CounterfactualExplanation['changes']): string[] {
+  if (!changes || changes.length === 0) {
+    return ['Continue monitoring for anomalous traffic patterns.'];
+  }
+
+  const sorted = [...changes].sort((a, b) => b.impact - a.impact);
+  const recs: string[] = [];
+
+  for (const c of sorted.slice(0, 5)) {
+    const param = c.parameter.toLowerCase();
+    if (param.includes('packet') || param.includes('count')) {
+      recs.push(`Investigate abnormal packet volume for ${c.parameter} (${c.original} → expected ${c.modified}). Consider rate limiting.`);
+    } else if (param.includes('byte') || param.includes('payload')) {
+      recs.push(`Examine payload sizes: ${c.parameter} shows ${c.original} vs normal ${c.modified}. May indicate data exfiltration or amplification.`);
+    } else if (param.includes('iat') || param.includes('time') || param.includes('interval')) {
+      recs.push(`Review timing patterns: ${c.parameter} (${c.original} vs ${c.modified}). Unusual intervals may indicate automated activity.`);
+    } else {
+      recs.push(`Monitor ${c.parameter}: current value ${c.original} deviates significantly from normal baseline ${c.modified}.`);
+    }
+  }
+
+  return recs;
+}
+
 export function CounterfactualStep({ data }: CounterfactualStepProps) {
+  const insights = useMemo(() => deriveInsights(data.changes), [data.changes]);
+  const recommendations = useMemo(() => deriveRecommendations(data.changes), [data.changes]);
+
   return (
     <div className="space-y-6">
       <Card className="bg-slate-900 border-slate-800">
@@ -104,46 +149,24 @@ export function CounterfactualStep({ data }: CounterfactualStepProps) {
 
             <Separator className="bg-slate-800" />
 
-            {/* Insights */}
+            {/* Dynamic Insights derived from actual data */}
             <Card className="bg-gradient-to-br from-blue-500/10 to-purple-500/10 border-blue-500/20">
               <CardHeader>
-                <CardTitle className="text-slate-100">AI-Generated Insights</CardTitle>
+                <CardTitle className="text-slate-100">Analysis Insights</CardTitle>
               </CardHeader>
               <CardContent>
                 <ul className="space-y-2 text-sm text-slate-300">
-                  <li className="flex items-start gap-2">
-                    <CheckCircle2 className="w-4 h-4 text-green-400 mt-0.5 flex-shrink-0" />
-                    <span>
-                      <strong>Authentication method</strong> is the strongest indicator (92% impact). 
-                      The direct database connection bypassing the Auth Service is highly suspicious.
-                    </span>
-                  </li>
-                  <li className="flex items-start gap-2">
-                    <CheckCircle2 className="w-4 h-4 text-green-400 mt-0.5 flex-shrink-0" />
-                    <span>
-                      <strong>Request rate</strong> of 450 req/min is 10x normal baseline. 
-                      Reducing to normal levels would significantly lower threat classification.
-                    </span>
-                  </li>
-                  <li className="flex items-start gap-2">
-                    <CheckCircle2 className="w-4 h-4 text-green-400 mt-0.5 flex-shrink-0" />
-                    <span>
-                      <strong>IP rotation pattern</strong> suggests automated attack. 
-                      Requests from a single known IP would reduce suspicion by 78%.
-                    </span>
-                  </li>
-                  <li className="flex items-start gap-2">
-                    <CheckCircle2 className="w-4 h-4 text-green-400 mt-0.5 flex-shrink-0" />
-                    <span>
-                      <strong>Off-hours access</strong> at 3:00 AM contributes moderately (45% impact). 
-                      Business-hour access would be less suspicious.
-                    </span>
-                  </li>
+                  {insights.map((insight, i) => (
+                    <li key={i} className="flex items-start gap-2">
+                      <CheckCircle2 className="w-4 h-4 text-green-400 mt-0.5 flex-shrink-0" />
+                      <span dangerouslySetInnerHTML={{ __html: insight.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>') }} />
+                    </li>
+                  ))}
                 </ul>
               </CardContent>
             </Card>
 
-            {/* Recommendations */}
+            {/* Dynamic Recommendations derived from actual data */}
             <Card className="bg-slate-900 border-slate-800">
               <CardHeader>
                 <CardTitle className="text-slate-100">Recommended Actions</CardTitle>
@@ -153,26 +176,12 @@ export function CounterfactualStep({ data }: CounterfactualStepProps) {
               </CardHeader>
               <CardContent>
                 <ol className="space-y-3 text-sm text-slate-300">
-                  <li className="flex gap-3">
-                    <span className="text-blue-400 font-semibold flex-shrink-0">1.</span>
-                    <span>Block direct database connections that bypass authentication service</span>
-                  </li>
-                  <li className="flex gap-3">
-                    <span className="text-blue-400 font-semibold flex-shrink-0">2.</span>
-                    <span>Implement rate limiting: cap database queries to 50 requests/min per source</span>
-                  </li>
-                  <li className="flex gap-3">
-                    <span className="text-blue-400 font-semibold flex-shrink-0">3.</span>
-                    <span>Add IP allowlisting for database access from internal services</span>
-                  </li>
-                  <li className="flex gap-3">
-                    <span className="text-blue-400 font-semibold flex-shrink-0">4.</span>
-                    <span>Enhance monitoring for off-hours database access patterns</span>
-                  </li>
-                  <li className="flex gap-3">
-                    <span className="text-blue-400 font-semibold flex-shrink-0">5.</span>
-                    <span>Require MFA for all database administrative operations</span>
-                  </li>
+                  {recommendations.map((rec, i) => (
+                    <li key={i} className="flex gap-3">
+                      <span className="text-blue-400 font-semibold flex-shrink-0">{i + 1}.</span>
+                      <span>{rec}</span>
+                    </li>
+                  ))}
                 </ol>
               </CardContent>
             </Card>
@@ -185,9 +194,15 @@ export function CounterfactualStep({ data }: CounterfactualStepProps) {
           <div className="text-center">
             <CheckCircle2 className="w-12 h-12 mx-auto mb-4 text-green-400" />
             <h3 className="text-slate-100 mb-2">Investigation Complete</h3>
-            <p className="text-sm text-slate-400">
+            <p className="text-sm text-slate-400 mb-4">
               All analysis steps completed. Review the findings and implement recommended actions.
             </p>
+            <Link to="/">
+              <Button className="bg-green-600 hover:bg-green-700">
+                <Home className="mr-2 w-4 h-4" />
+                Back to Dashboard
+              </Button>
+            </Link>
           </div>
         </CardContent>
       </Card>

@@ -1105,10 +1105,24 @@ def generate_embeddings(
     # GNN PATH: use trained model to produce edge embeddings
     # ══════════════════════════════════════════════════════
     if model is not None:
+        # TemporalGNNEncoder: use positional batch inference
+        # (the encoder's set_graph_sequence was called with preprocessed
+        #  copies in the same order, so we iterate by index)
+        from src.Backend.temporal_gnn import TemporalGNNEncoder
+        is_temporal = isinstance(model, TemporalGNNEncoder)
+
         emb_chunks: list[np.ndarray] = []
-        for g in graphs:
-            edge_emb = model.encode(g)  # (E, D) tensor, L2-normalised
-            emb_chunks.append(edge_emb.cpu().numpy())
+        # torch.no_grad() disables autograd tape entirely — saves memory
+        # allocation + backward-graph construction, giving ~2x speedup.
+        with torch.no_grad():
+            for idx, g in enumerate(graphs):
+                if is_temporal and model._all_graphs is not None:
+                    # Use the preprocessed graph at the same position
+                    preprocessed_g = model._all_graphs[min(idx, len(model._all_graphs) - 1)]
+                    edge_emb = model.encode(preprocessed_g)
+                else:
+                    edge_emb = model.encode(g)  # (E, D) tensor, L2-normalised
+                emb_chunks.append(edge_emb.cpu().numpy())
         embeddings = np.vstack(emb_chunks).astype(np.float32)
         actual_dim = embeddings.shape[1]
         if actual_dim != embedding_dim:

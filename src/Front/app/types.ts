@@ -103,14 +103,16 @@ export interface BackendFlowsResponse {
 }
 
 export interface BackendCounterfactualResponse {
+  cf_id: string;
   flow_id: string;
-  anomalous_flow: Record<string, unknown>;
-  nearest_normal: Record<string, unknown>;
-  diffs: Array<{
+  nearest_normal_id: string;
+  similarity_score: number;
+  feature_diffs: Array<{
     feature: string;
-    anomalous_value: number;
-    normal_value: number;
+    original_value: number;
+    cf_value: number;
     abs_diff: number;
+    pct_change: number;
     direction: string;
   }>;
 }

@@ -487,7 +487,9 @@ def _tool_severity(flow_id: str, **kwargs) -> dict:
     z[~valid] = 0.0
     scores = {f: round(float(z[i]), 2) for i, f in enumerate(feats) if valid[i]}
     max_z = float(z[valid].max()) if valid.any() else 0.0
-    if max_z >= 3:
+    if max_z >= 5:
+        level = "critical"
+    elif max_z >= 3:
         level = "high"
     elif max_z >= 1.5:
         level = "medium"
@@ -681,7 +683,7 @@ TOOL_SCHEMAS: list[dict] = [
         "type": "function",
         "function": {
             "name": "assess_severity",
-            "description": "Assess the severity level (low/medium/high) of an anomalous flow by computing z-scores of its features against the normal baseline distribution. Returns per-feature deviation scores.",
+            "description": "Assess the severity level (low/medium/high/critical) of an anomalous flow by computing z-scores of its features against the normal baseline distribution. Returns per-feature deviation scores.",
             "parameters": {
                 "type": "object",
                 "properties": {

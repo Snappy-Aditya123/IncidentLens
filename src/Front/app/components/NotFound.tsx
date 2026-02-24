@@ -7,7 +7,7 @@ export function NotFound() {
     <div className="flex items-center justify-center min-h-screen">
       <div className="text-center">
         <AlertTriangle className="w-16 h-16 mx-auto mb-4 text-yellow-500" />
-        <h1 className="mb-2">404 - Page Not Found</h1>
+        <h1 className="text-4xl font-bold text-slate-100 mb-2">404 - Page Not Found</h1>
         <p className="text-slate-400 mb-6">The page you're looking for doesn't exist.</p>
         <Link to="/">
           <Button>Go to Dashboard</Button>

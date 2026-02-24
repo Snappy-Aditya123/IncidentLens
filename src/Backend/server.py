@@ -74,6 +74,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.on_event("startup")
+def _startup_load_gnn():
+    """Auto-load pretrained Temporal GNN at server startup (if checkpoint exists)."""
+    from src.Backend.temporal_gnn import TemporalGNNEncoder, get_default_checkpoint
+
+    ckpt = get_default_checkpoint()
+    if ckpt.exists():
+        try:
+            encoder = TemporalGNNEncoder.from_checkpoint(ckpt)
+            wrappers.set_gnn_encoder(encoder)
+            logger.info("Loaded pretrained TemporalGNN from %s", ckpt)
+        except Exception as exc:
+            logger.warning("Failed to load GNN checkpoint: %s", exc)
+    else:
+        logger.info("No GNN checkpoint at %s — predictions will be unavailable", ckpt)
+
 # Agent singleton (reused across requests)
 _agent: IncidentAgent | None = None
 

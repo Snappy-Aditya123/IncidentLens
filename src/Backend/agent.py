@@ -55,7 +55,7 @@ Your job:
    explanations.
 3. **Explain** root causes — which features (packet_count, total_bytes, \
    mean_payload, mean_iat, std_iat) deviate from normal and by how much.
-4. **Assess severity** (low / medium / high) based on statistical deviation.
+4. **Assess severity** (low / medium / high / critical) based on statistical deviation.
 5. **Recommend actions** (block IP, rate-limit, investigate further, etc.).
 
 Investigation protocol:
@@ -71,7 +71,7 @@ Output format for your FINAL answer (after all tool calls):
 ```
 ## Investigation Summary
 **Incident**: <one-line description>
-**Severity**: <low|medium|high>
+**Severity**: <low|medium|high|critical>
 **Root Cause**: <ranked list of contributing factors>
 **Evidence**: <key data points from tools>
 **Recommendation**: <actionable steps>

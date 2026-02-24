@@ -239,7 +239,7 @@ export function GNNStep({ data, onNext }: GNNStepProps) {
         </CardHeader>
         <CardContent>
           <div className="space-y-3">
-            {data.nodes
+            {[...data.nodes]
               .sort((a, b) => b.risk - a.risk)
               .slice(0, 5)
               .map((node) => (
