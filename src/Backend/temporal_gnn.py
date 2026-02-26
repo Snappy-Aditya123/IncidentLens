@@ -71,7 +71,15 @@ def preprocess_graph(graph: Data) -> Data:
 
 
 def preprocess_graphs(graphs: list[Data]) -> list[Data]:
-    """Pre-process a list of graphs (add self-loops + normalization)."""
+    """Pre-process a list of graphs (add self-loops + normalization).
+
+    Uses ThreadPoolExecutor for large workloads (>200 graphs) since
+    add_self_loops + degree computation are independent per graph.
+    """
+    if len(graphs) > 200:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor() as pool:
+            return list(pool.map(preprocess_graph, graphs))
     return [preprocess_graph(g) for g in graphs]
 
 
@@ -116,23 +124,36 @@ def normalize_features_global(
     Returns ``(graphs, stats)`` so the same transform can be applied to
     unseen/test data via ``apply_normalization()``.
     """
-    all_x = np.concatenate([g.x.detach().cpu().numpy() for g in graphs if g.x is not None], axis=0)
-    all_e = np.concatenate([g.edge_attr.detach().cpu().numpy() for g in graphs if g.edge_attr is not None], axis=0)
+    x_arrays = [g.x.detach().cpu().numpy() for g in graphs if g.x is not None]
+    e_arrays = [g.edge_attr.detach().cpu().numpy() for g in graphs if g.edge_attr is not None]
 
-    node_mean = all_x.mean(axis=0).astype(np.float32)
-    node_std = all_x.std(axis=0).astype(np.float32)
-    node_std[node_std < eps] = 1.0
+    if x_arrays:
+        all_x = np.concatenate(x_arrays, axis=0)
+        node_mean = all_x.mean(axis=0).astype(np.float32)
+        node_std = all_x.std(axis=0).astype(np.float32)
+        node_std[node_std < eps] = 1.0
+    else:
+        node_mean = np.zeros(1, dtype=np.float32)
+        node_std = np.ones(1, dtype=np.float32)
 
-    edge_mean = all_e.mean(axis=0).astype(np.float32)
-    edge_std = all_e.std(axis=0).astype(np.float32)
-    edge_std[edge_std < eps] = 1.0
+    if e_arrays:
+        all_e = np.concatenate(e_arrays, axis=0)
+        edge_mean = all_e.mean(axis=0).astype(np.float32)
+        edge_std = all_e.std(axis=0).astype(np.float32)
+        edge_std[edge_std < eps] = 1.0
+    else:
+        edge_mean = np.zeros(1, dtype=np.float32)
+        edge_std = np.ones(1, dtype=np.float32)
 
     nm, ns = torch.from_numpy(node_mean), torch.from_numpy(node_std)
     em, es = torch.from_numpy(edge_mean), torch.from_numpy(edge_std)
 
+    # In-place operations: halves memory allocations (2N instead of 4N tensors)
     for g in graphs:
-        g.x = (g.x - nm) / ns
-        g.edge_attr = (g.edge_attr - em) / es
+        if g.x is not None:
+            g.x.sub_(nm).div_(ns)
+        if g.edge_attr is not None:
+            g.edge_attr.sub_(em).div_(es)
 
     stats = {"node_mean": nm, "node_std": ns, "edge_mean": em, "edge_std": es}
     return graphs, stats
@@ -306,7 +327,7 @@ def prepare_temporal_dataset(
         packets_df[label_col] = packets_df[label_col].fillna(0).astype(int)
 
     # 2. Build sliding-window graphs (uses graph_data_wrapper pipeline)
-    graphs = build_sliding_window_graphs(
+    graphs, _id_to_ip = build_sliding_window_graphs(
         packets_df,
         window_size=window_size,
         stride=stride,
@@ -419,11 +440,12 @@ def collate_temporal_batch(
         # edge_index, edge_attr, y, norm, edge_index_with_loops, etc.)
         # in a single call, avoiding manual per-attribute transfers and
         # the risk of missing newly-added tensor attributes.
+        # non_blocking=True enables async CPU→GPU transfers for pipeline overlap.
         batch = [
-            [g.clone().to(device) for g in seq]
+            [g.clone().to(device, non_blocking=True) for g in seq]
             for seq in batch
         ]
-        labels = labels.to(device)
+        labels = labels.to(device, non_blocking=True)
 
     return batch, labels
 
@@ -570,12 +592,13 @@ class EvolvingGNN(nn.Module):
                 norm=norm, edge_index_with_loops=ei_loops,
             )
             x = F.relu(x)
-            x = F.dropout(x, p=self.dropout, training=self.training)
-
-            # Only keep the last graph's embeddings (saves memory)
+            # Skip dropout on non-final steps during inference (saves GPU ops)
             if i == seq_len - 1:
+                x = F.dropout(x, p=self.dropout, training=self.training)
                 final_embeddings = x
                 final_graph = graph
+            elif self.training:
+                x = F.dropout(x, p=self.dropout, training=True)
 
         return final_embeddings, final_graph
 
@@ -744,11 +767,13 @@ class EvolvingGNN_ODE(nn.Module):
                 norm=norm, edge_index_with_loops=ei_loops,
             )
             x = F.relu(x)
-            x = F.dropout(x, p=self.dropout, training=self.training)
-
+            # Skip dropout on non-final steps during inference (saves GPU ops)
             if i == seq_len - 1:
+                x = F.dropout(x, p=self.dropout, training=self.training)
                 final_embeddings = x
                 final_graph = graph
+            elif self.training:
+                x = F.dropout(x, p=self.dropout, training=True)
 
         return final_embeddings, final_graph
 

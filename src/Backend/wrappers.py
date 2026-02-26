@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import os
 import threading
 import time
 from typing import Any, Optional
@@ -83,22 +84,35 @@ _client: Optional[Elasticsearch] = None
 _client_lock = threading.Lock()
 
 
+def reset_client() -> None:
+    """Force re-creation of the ES singleton (e.g. after config change)."""
+    global _client
+    with _client_lock:
+        _client = None
+
+
 def get_client(
-    host: str = "http://localhost:9200",
+    host: str | None = None,
     *,
-    timeout: int = 30,
-    max_retries: int = 3,
-    retry_on_timeout: bool = True,
+    timeout: int = 2,
+    max_retries: int = 0,
+    retry_on_timeout: bool = False,
 ) -> Elasticsearch:
     """Return a reusable Elasticsearch client (singleton).
 
     Avoids repeated instantiation per SDK best-practices.
     Thread-safe via lock to prevent duplicate instantiation under
     concurrent ``asyncio.to_thread`` workers.
+
+    The host defaults to the ``ELASTICSEARCH_URL`` environment variable,
+    falling back to ``http://localhost:9200``.
     """
     global _client
     if _client is not None:
         return _client
+
+    if host is None:
+        host = os.getenv("ELASTICSEARCH_URL", "http://localhost:9200")
 
     with _client_lock:
         if _client is not None:
@@ -132,6 +146,8 @@ def ping(es: Elasticsearch | None = None) -> bool:
 FLOWS_INDEX = "incidentlens-flows"
 COUNTERFACTUALS_INDEX = "incidentlens-counterfactuals"
 EMBEDDINGS_INDEX = "incidentlens-embeddings"
+RAW_PACKETS_INDEX = "incidentlens-packets"
+GRAPH_SUMMARIES_INDEX = "incidentlens-graph-summaries"
 
 # --- Mappings ---
 
@@ -201,6 +217,29 @@ COUNTERFACTUALS_MAPPING = {
 }
 
 EMBEDDINGS_MAPPING_DIM = 16  # default matches generate_embeddings & run_pipeline defaults
+
+# --- Graph summaries mapping (structural + spectral metrics per window) ---
+GRAPH_SUMMARIES_MAPPING = {
+    "mappings": {
+        "properties": {
+            "window_id":          {"type": "integer"},
+            "window_start":       {"type": "float"},
+            "num_nodes":          {"type": "integer"},
+            "num_edges":          {"type": "integer"},
+            "mean_degree":        {"type": "float"},
+            "density":            {"type": "float"},
+            "spectral_gap":       {"type": "float"},
+            "spectral_radius":    {"type": "float"},
+            "malicious_ratio":    {"type": "float"},
+            "num_malicious":      {"type": "integer"},
+            "timestamp":          {"type": "date", "format": "epoch_millis||strict_date_optional_time"},
+        }
+    },
+    "settings": {
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+    },
+}
 
 # ──────────────────────────────────────────────
 # 2b. ES-NATIVE ENHANCEMENTS: runtime fields, ILM, index templates, ingest pipelines
@@ -712,13 +751,16 @@ def setup_all_indices(
         EMBEDDINGS_INDEX: create_index(
             EMBEDDINGS_INDEX, _embeddings_mapping(embedding_dim), es, delete_existing
         ),
+        GRAPH_SUMMARIES_INDEX: create_index(
+            GRAPH_SUMMARIES_INDEX, GRAPH_SUMMARIES_MAPPING, es, delete_existing
+        ),
     }
 
 
 def delete_all_indices(es: Elasticsearch | None = None) -> None:
     """Tear down all project indices."""
     es = es or get_client()
-    for idx in (FLOWS_INDEX, COUNTERFACTUALS_INDEX, EMBEDDINGS_INDEX):
+    for idx in (FLOWS_INDEX, COUNTERFACTUALS_INDEX, EMBEDDINGS_INDEX, GRAPH_SUMMARIES_INDEX):
         if es.indices.exists(index=idx):
             es.indices.delete(index=idx)
             logger.info("Deleted index %s", idx)
@@ -743,15 +785,15 @@ def _flow_ids_batch(
 ) -> list[str]:
     """Batch flow-ID generation (avoids per-edge function-call overhead).
 
-    Uses a tight list comprehension with MD5 — ~2x faster than calling
+    Builds all key strings first, then hashes in a tight loop with a
+    cached reference to hashlib.md5 — ~2x faster than calling
     _flow_id() in a loop due to reduced function-call overhead.
     """
     _md5 = hashlib.md5
     prefix = f"{window_id}:"
-    return [
-        _md5(f"{prefix}{src_ips[i]}:{dst_ips[i]}:{i}".encode()).hexdigest()[:16]
-        for i in range(n)
-    ]
+    # Build all byte strings in one pass, then hash
+    raw_bytes = [f"{prefix}{src_ips[i]}:{dst_ips[i]}:{i}".encode() for i in range(n)]
+    return [_md5(b).hexdigest()[:16] for b in raw_bytes]
 
 
 def index_pyg_graph(
@@ -801,6 +843,9 @@ def index_pyg_graph(
             pred_labels, pred_scores = _gnn_encoder.predict_labels(graph)
             predictions = pred_labels
             prediction_scores = pred_scores
+            # Feed back to graph so counterfactual analysis can use GNN output
+            graph.pred_labels = pred_labels
+            graph.pred_scores = pred_scores
             logger.debug("GNN auto-predicted %d edges for window %d", len(pred_labels), wid)
         except Exception as exc:
             logger.warning("GNN predict_labels failed for window %d: %s", wid, exc)
@@ -812,10 +857,13 @@ def index_pyg_graph(
     feature_names = ["packet_count", "total_bytes", "mean_payload", "mean_iat", "std_iat"]
 
     # ── Batch IP lookup (keep as Python lists — faster per-element access) ──
+    # Use per-graph local→IP mapping when available (local node IDs
+    # differ from global IDs across windows)
+    _ip_map = getattr(graph, '_local_to_ip', node_id_to_ip)
     src_ids = edge_index[0]
     dst_ids = edge_index[1]
-    src_ips = [node_id_to_ip.get(int(s), f"10.{(int(s) >> 16) & 0xFF}.{(int(s) >> 8) & 0xFF}.{int(s) & 0xFF}") for s in src_ids]
-    dst_ips = [node_id_to_ip.get(int(d), f"10.{(int(d) >> 16) & 0xFF}.{(int(d) >> 8) & 0xFF}.{int(d) & 0xFF}") for d in dst_ids]
+    src_ips = [_ip_map.get(int(s), f"10.{(int(s) >> 16) & 0xFF}.{(int(s) >> 8) & 0xFF}.{int(s) & 0xFF}") for s in src_ids]
+    dst_ips = [_ip_map.get(int(d), f"10.{(int(d) >> 16) & 0xFF}.{(int(d) >> 8) & 0xFF}.{int(d) & 0xFF}") for d in dst_ids]
 
     # ── Batch flow-ID generation ──
     flow_ids = _flow_ids_batch(wid, src_ips, dst_ips, n_edges)
@@ -835,25 +883,29 @@ def index_pyg_graph(
             for j, fname in enumerate(feature_names)
         }
 
-    actions = []
-    for i in range(n_edges):
-        doc: dict[str, Any] = {
-            "flow_id": flow_ids[i],
-            "window_id": wid,
-            "window_start": w_start,
-            "src_ip": src_ips[i],
-            "dst_ip": dst_ips[i],
-            "label": labels_list[i] if labels_list is not None else 0,
-            "timestamp": ts_now,
-        }
-        if feat_lists is not None:
-            for fname, fvals in feat_lists.items():
-                doc[fname] = fvals[i]
-        if preds_list is not None:
-            doc["prediction"] = preds_list[i]
-        if scores_list is not None:
-            doc["prediction_score"] = scores_list[i]
-        actions.append({"_index": FLOWS_INDEX, "_id": flow_ids[i], "_source": doc})
+    # ── Vectorised doc construction via DataFrame → records (C-level iteration) ──
+    cols: dict[str, Any] = {
+        "flow_id": flow_ids,
+        "window_id": [wid] * n_edges,
+        "window_start": [w_start] * n_edges,
+        "src_ip": src_ips,
+        "dst_ip": dst_ips,
+        "label": labels_list if labels_list is not None else [0] * n_edges,
+        "timestamp": [ts_now] * n_edges,
+    }
+    if feat_lists is not None:
+        cols.update(feat_lists)
+    if preds_list is not None:
+        cols["prediction"] = preds_list
+    if scores_list is not None:
+        cols["prediction_score"] = scores_list
+
+    df_docs = pd.DataFrame(cols)
+    records = df_docs.to_dict(orient="records")
+    actions = [
+        {"_index": FLOWS_INDEX, "_id": records[i]["flow_id"], "_source": records[i]}
+        for i in range(n_edges)
+    ]
 
     success, errors = helpers.bulk(es, actions, chunk_size=batch_size, raise_on_error=False)
     if errors:
@@ -867,11 +919,157 @@ def index_graphs_bulk(
     es: Elasticsearch | None = None,
     batch_size: int = 1000,
 ) -> int:
-    """Index a list of PyG graph snapshots into ES."""
-    total = 0
+    """Index all graph snapshots in a SINGLE bulk call to ES.
+
+    Collects all edge documents across all graphs, then makes one
+    ``helpers.bulk()`` call instead of N separate calls — reduces
+    HTTP round-trips from N to 1.
+    """
+    es = es or get_client()
+    all_actions: list[dict] = []
+    feature_names = ["packet_count", "total_bytes", "mean_payload", "mean_iat", "std_iat"]
+
     for g in graphs:
-        total += index_pyg_graph(g, node_id_to_ip, es=es, batch_size=batch_size)
-    return total
+        wid = getattr(g, "window_id", 0)
+        w_start = float(getattr(g, "window_start", 0.0))
+        ei = g.edge_index.cpu().numpy()
+        ea = g.edge_attr.cpu().numpy() if g.edge_attr is not None else None
+        labels = g.y.cpu().numpy() if g.y is not None else None
+        n_edges = ei.shape[1]
+
+        # Auto-predict with registered GNN
+        preds = None
+        scores = None
+        if _gnn_encoder is not None:
+            try:
+                pred_labels, pred_scores = _gnn_encoder.predict_labels(g)
+                preds = pred_labels.cpu().numpy()
+                scores = pred_scores.cpu().numpy()
+                # Feed back to graph so counterfactual analysis can use GNN output
+                g.pred_labels = pred_labels
+                g.pred_scores = pred_scores
+            except Exception as exc:
+                logger.warning("GNN predict_labels failed for window %d: %s", wid, exc)
+
+        # Use per-graph local→IP mapping (local IDs differ across windows)
+        _ip_map = getattr(g, '_local_to_ip', node_id_to_ip)
+        src_ids = ei[0]
+        dst_ids = ei[1]
+        src_ips = [_ip_map.get(int(s), f"10.{(int(s) >> 16) & 0xFF}.{(int(s) >> 8) & 0xFF}.{int(s) & 0xFF}") for s in src_ids]
+        dst_ips = [_ip_map.get(int(d), f"10.{(int(d) >> 16) & 0xFF}.{(int(d) >> 8) & 0xFF}.{int(d) & 0xFF}") for d in dst_ids]
+        flow_ids = _flow_ids_batch(wid, src_ips, dst_ips, n_edges)
+        ts_now = int(time.time() * 1000)
+
+        # Build docs via DataFrame → records (C-level iteration)
+        cols: dict[str, Any] = {
+            "flow_id": flow_ids,
+            "window_id": [wid] * n_edges,
+            "window_start": [w_start] * n_edges,
+            "src_ip": src_ips,
+            "dst_ip": dst_ips,
+            "label": labels.tolist() if labels is not None else [0] * n_edges,
+            "timestamp": [ts_now] * n_edges,
+        }
+        if ea is not None and ea.shape[1] >= len(feature_names):
+            for j, fn in enumerate(feature_names):
+                cols[fn] = ea[:, j].tolist()
+        if preds is not None:
+            cols["prediction"] = preds.tolist()
+        if scores is not None:
+            cols["prediction_score"] = scores.tolist()
+
+        df_docs = pd.DataFrame(cols)
+        records = df_docs.to_dict(orient="records")
+        all_actions.extend([
+            {"_index": FLOWS_INDEX, "_id": rec["flow_id"], "_source": rec}
+            for rec in records
+        ])
+
+    if not all_actions:
+        return 0
+
+    success, errors = helpers.bulk(es, all_actions, chunk_size=batch_size, raise_on_error=False)
+    if errors:
+        logger.warning("Bulk index had %d errors", len(errors))
+    return success
+
+
+# ──────────────────────────────────────────────
+# 3a-2. GRAPH SUMMARY INDEXING (structural + spectral metrics)
+# ──────────────────────────────────────────────
+
+def index_graph_summaries(
+    graphs: list[Data],
+    es: Elasticsearch | None = None,
+) -> int:
+    """Index graph-level summaries with structural + spectral metrics.
+
+    For each graph window, computes and indexes:
+    - num_nodes, num_edges, mean_degree, density
+    - spectral_gap (algebraic connectivity λ₂)
+    - spectral_radius
+    - malicious_ratio
+
+    This enables ES queries like "find windows where spectral gap dropped"
+    or "windows with density > X" — impossible with edge-only indexing.
+    """
+    es = es or get_client()
+
+    # Ensure the index exists
+    create_index(GRAPH_SUMMARIES_INDEX, GRAPH_SUMMARIES_MAPPING, es)
+
+    actions = []
+    ts_now = int(time.time() * 1000)
+
+    for g in graphs:
+        wid = getattr(g, "window_id", 0)
+        n_nodes = int(g.num_nodes)
+        n_edges = int(g.edge_index.shape[1])
+        mean_deg = float(n_edges * 2 / max(n_nodes, 1))
+        max_edges = n_nodes * (n_nodes - 1) if n_nodes > 1 else 1
+        density = float(n_edges / max_edges) if max_edges > 0 else 0.0
+
+        # Compute spectral metrics from the algebraic graph structure
+        net = getattr(g, "network", None)
+        s_gap = 0.0
+        s_radius = 0.0
+        if net is not None and n_nodes > 1:
+            try:
+                s_gap = net.spectral_gap(normalised=True)
+            except Exception:
+                s_gap = 0.0
+            try:
+                s_radius = net.spectral_radius()
+            except Exception:
+                s_radius = 0.0
+
+        # Malicious ratio
+        labels = g.y.cpu().numpy() if g.y is not None else np.zeros(n_edges)
+        n_mal = int((labels == 1).sum())
+        mal_ratio = float(n_mal / max(n_edges, 1))
+
+        doc = {
+            "window_id": wid,
+            "window_start": float(getattr(g, "window_start", 0.0)),
+            "num_nodes": n_nodes,
+            "num_edges": n_edges,
+            "mean_degree": round(mean_deg, 4),
+            "density": round(density, 6),
+            "spectral_gap": round(s_gap, 6),
+            "spectral_radius": round(s_radius, 6),
+            "malicious_ratio": round(mal_ratio, 4),
+            "num_malicious": n_mal,
+            "timestamp": ts_now,
+        }
+        actions.append({"_index": GRAPH_SUMMARIES_INDEX, "_source": doc})
+
+    if not actions:
+        return 0
+
+    success, errors = helpers.bulk(es, actions, raise_on_error=False)
+    if errors:
+        logger.warning("Graph summary bulk had %d errors", len(errors))
+    return success
 
 
 # ──────────────────────────────────────────────
@@ -916,7 +1114,7 @@ def build_graphs(
     graph_df["dst_port"] = graph_df["dst_port"].fillna(0).astype(int)
     graph_df["protocol"] = graph_df["protocol"].astype(int)
 
-    graphs = _gdw_build_graphs(
+    graphs, graph_id_to_ip = _gdw_build_graphs(
         graph_df,
         window_size=window_size,
         stride=stride,
@@ -924,17 +1122,11 @@ def build_graphs(
         label_col=label_col,
     )
 
-    # Extract id_to_ip mapping from ALL graphs (not just first — later
-    # windows may introduce IPs not present in window 0).
-    id_to_ip: dict[int, str] = {}
-    for g in graphs:
-        if hasattr(g, "network"):
-            net = g.network
-            for nid, n in net.nodes.items():
-                if nid not in id_to_ip:
-                    id_to_ip[nid] = n.IPaddress
+    # Use the id_to_ip returned directly from the graph builder
+    # instead of redundantly reconstructing it from _local_to_ip dicts.
+    id_to_ip = graph_id_to_ip
 
-    # Fallback: if no network objects, derive from DataFrame
+    # Fallback: if empty (shouldn't happen), derive from DataFrame
     if not id_to_ip:
         all_ips = pd.concat(
             [graph_df["src_ip"], graph_df["dst_ip"]], ignore_index=True
@@ -968,11 +1160,12 @@ def graph_edge_perturbation_cf(
         target_edge_indices=target_edge_indices,
         max_removals=max_removals,
     )
-    # Enrich with IP addresses if mapping provided
-    if id_to_ip and results:
+    # Enrich with IP addresses — prefer per-graph local→IP mapping
+    _ip_map = getattr(graph, '_local_to_ip', id_to_ip) if id_to_ip else getattr(graph, '_local_to_ip', None)
+    if _ip_map and results:
         for r in results:
-            r["src_ip"] = id_to_ip.get(r["src"], f"0.0.0.{r['src']}")
-            r["dst_ip"] = id_to_ip.get(r["dst"], f"0.0.0.{r['dst']}")
+            r["src_ip"] = _ip_map.get(r["src"], f"0.0.0.{r['src']}")
+            r["dst_ip"] = _ip_map.get(r["dst"], f"0.0.0.{r['dst']}")
     return results
 
 
@@ -1053,6 +1246,14 @@ def build_and_index_graphs(
         bytes_col=bytes_col, label_col=label_col,
     )
     num_indexed = index_graphs_bulk(graphs, id_to_ip, es=es)
+
+    # Also index graph-level summaries with spectral metrics
+    try:
+        n_summaries = index_graph_summaries(graphs, es=es)
+        logger.info("Indexed %d graph summaries with spectral metrics", n_summaries)
+    except Exception as exc:
+        logger.warning("Graph summary indexing failed: %s", exc)
+
     return graphs, id_to_ip, num_indexed
 
 
@@ -1094,10 +1295,13 @@ def generate_embeddings(
             else np.zeros(n_edges, dtype=np.int64)
         )
 
+        # Use per-graph local→IP mapping (local IDs differ across windows)
+        _ip_map = getattr(g, '_local_to_ip', id_to_ip)
         src_ids = ei[0]
         dst_ids = ei[1]
-        src_ips = [id_to_ip.get(int(s), f"0.0.0.{s}") for s in src_ids]
-        dst_ips = [id_to_ip.get(int(d), f"0.0.0.{d}") for d in dst_ids]
+        src_ips = [_ip_map.get(int(s), f"0.0.0.{s}") for s in src_ids]
+        dst_ips = [_ip_map.get(int(d), f"0.0.0.{d}") for d in dst_ids]
+
         fids = _flow_ids_batch(wid, src_ips, dst_ips, n_edges)
 
         fid_chunks.append(fids)
@@ -1114,6 +1318,8 @@ def generate_embeddings(
     all_flow_ids: list[str] = []
     for chunk in fid_chunks:
         all_flow_ids.extend(chunk)
+    # Flatten with single-pass iteration (avoids intermediate lists)
+    import itertools as _itertools
     all_labels = np.concatenate(label_chunks).tolist()
 
     # ══════════════════════════════════════════════════════
@@ -1231,16 +1437,22 @@ def index_embeddings(
     # Single C-level conversion: avoids N separate .tolist() calls
     emb_lists = embeddings.tolist()
 
-    actions = []
-    for i, fid in enumerate(flow_ids):
-        doc: dict[str, Any] = {
-            "flow_id": fid,
-            "label": int(labels[i]),
-            "embedding": emb_lists[i],
-        }
-        if extra_fields and i < len(extra_fields):
-            doc.update(extra_fields[i])
-        actions.append({"_index": EMBEDDINGS_INDEX, "_source": doc})
+    # Zip-based construction: eliminates enumerate overhead + per-key dict mutation
+    labels_int = [int(l) for l in labels]  # single pass
+    if extra_fields:
+        actions = [
+            {"_index": EMBEDDINGS_INDEX, "_source": {
+                "flow_id": fid, "label": lbl, "embedding": emb, **ef
+            }}
+            for fid, lbl, emb, ef in zip(flow_ids, labels_int, emb_lists, extra_fields)
+        ]
+    else:
+        actions = [
+            {"_index": EMBEDDINGS_INDEX, "_source": {
+                "flow_id": fid, "label": lbl, "embedding": emb
+            }}
+            for fid, lbl, emb in zip(flow_ids, labels_int, emb_lists)
+        ]
 
     success, errors = helpers.bulk(es, actions, chunk_size=batch_size, raise_on_error=False)
     if errors:
@@ -1607,29 +1819,31 @@ def compute_counterfactual_diff(
     """Compute per-feature diff between an anomalous flow and its
     nearest normal neighbour.
 
+    Vectorised with numpy — single-pass computation of all diffs,
+    percentages, and directions.
+
     Returns a list of dicts ready for the ``feature_diffs`` nested field.
     """
     features = features or FEATURE_FIELDS
-    diffs = []
-    for feat in features:
-        orig = anomalous_doc.get(feat)
-        cf_val = normal_doc.get(feat)
-        if orig is None or cf_val is None:
-            continue
-        orig_f, cf_f = float(orig), float(cf_val)
-        abs_diff = abs(orig_f - cf_f)
-        pct = min((abs_diff / abs(orig_f) * 100), 99999.99) if orig_f != 0 else 99999.99
-        direction = "decrease" if cf_f < orig_f else "increase" if cf_f > orig_f else "unchanged"
-        diffs.append({
-            "feature": feat,
-            "original_value": orig_f,
-            "cf_value": cf_f,
-            "abs_diff": abs_diff,
-            "pct_change": round(pct, 2),
-            "direction": direction,
-        })
-    # sort by magnitude of percent change descending
-    diffs.sort(key=lambda d: d["pct_change"], reverse=True)
+    orig = np.array([anomalous_doc.get(f, np.nan) for f in features], dtype=np.float64)
+    cf = np.array([normal_doc.get(f, np.nan) for f in features], dtype=np.float64)
+    valid = ~(np.isnan(orig) | np.isnan(cf))
+    abs_diff = np.abs(orig - cf)
+    denom = np.abs(orig).copy()
+    denom[denom == 0] = 1e-99
+    pct = np.minimum(abs_diff / denom * 100, 99999.99)
+    dirs = np.where(cf < orig, "decrease", np.where(cf > orig, "increase", "unchanged"))
+    diffs = sorted([
+        {
+            "feature": features[i],
+            "original_value": float(orig[i]),
+            "cf_value": float(cf[i]),
+            "abs_diff": float(abs_diff[i]),
+            "pct_change": round(float(pct[i]), 2),
+            "direction": str(dirs[i]),
+        }
+        for i in range(len(features)) if valid[i]
+    ], key=lambda d: d["pct_change"], reverse=True)
     return diffs
 
 

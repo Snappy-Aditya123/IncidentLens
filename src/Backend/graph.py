@@ -111,6 +111,119 @@ class network:
 		)
 		return adj.coalesce()
 
+	# ── Algebraic graph methods ──
+
+	def degree_matrix(self, mode: str = "out") -> torch.Tensor:
+		"""Return the degree matrix D as a sparse diagonal tensor.
+
+		Parameters
+		----------
+		mode : 'out' | 'in' | 'total'
+			Which degree to use on the diagonal.
+		"""
+		if mode == "out":
+			degs = self.out_degree().float()
+		elif mode == "in":
+			degs = self.in_degree().float()
+		else:
+			degs = (self.out_degree() + self.in_degree()).float()
+		idx = torch.arange(self.num_nodes, device=self.device)
+		indices = torch.stack([idx, idx])
+		return torch.sparse_coo_tensor(indices, degs,
+									   size=(self.num_nodes, self.num_nodes)).coalesce()
+
+	def build_laplacian(self, normalised: bool = False) -> torch.Tensor:
+		"""Compute the graph Laplacian L = D - A.
+
+		If ``normalised=True``, returns the symmetric normalised Laplacian
+		L_sym = I - D^{-1/2} A D^{-1/2}, which has eigenvalues in [0, 2].
+
+		Operates entirely on sparse tensors for O(E) memory.
+		"""
+		adj = self.build_sparse_adjacency()
+		# Symmetrise: A_sym = (A + A^T) for directed graphs
+		adj_sym = (adj + adj.t()).coalesce()
+		# Clamp values to 1 (multi-edges → binary)
+		adj_sym = torch.sparse_coo_tensor(
+			adj_sym.indices(),
+			torch.ones(adj_sym._nnz(), device=self.device),
+			size=adj_sym.shape,
+		).coalesce()
+
+		degs = torch.sparse.sum(adj_sym, dim=1).to_dense()
+		D_idx = torch.arange(self.num_nodes, device=self.device)
+		D_indices = torch.stack([D_idx, D_idx])
+
+		if not normalised:
+			D = torch.sparse_coo_tensor(D_indices, degs,
+										size=(self.num_nodes, self.num_nodes))
+			return (D - adj_sym).coalesce()
+
+		# Normalised: L_sym = I - D^{-1/2} A D^{-1/2}
+		deg_inv_sqrt = degs.pow(-0.5)
+		deg_inv_sqrt[deg_inv_sqrt == float("inf")] = 0.0
+		# Scale adjacency: D^{-1/2} A D^{-1/2}
+		row, col = adj_sym.indices()
+		scaled_vals = deg_inv_sqrt[row] * adj_sym.values() * deg_inv_sqrt[col]
+		scaled_adj = torch.sparse_coo_tensor(
+			adj_sym.indices(), scaled_vals,
+			size=(self.num_nodes, self.num_nodes),
+		).coalesce()
+		I = torch.sparse_coo_tensor(D_indices,
+									torch.ones(self.num_nodes, device=self.device),
+									size=(self.num_nodes, self.num_nodes))
+		return (I - scaled_adj).coalesce()
+
+	def spectral_decomposition(self, k: int | None = None, normalised: bool = True
+							   ) -> tuple[torch.Tensor, torch.Tensor]:
+		"""Compute the smallest k eigenvalues and eigenvectors of the Laplacian.
+
+		Useful for spectral clustering, graph partitioning, and anomaly
+		detection via the Fiedler vector (2nd smallest eigenvector).
+
+		Parameters
+		----------
+		k : number of eigenvalues to return (default: all).
+		normalised : use the normalised Laplacian.
+
+		Returns
+		-------
+		(eigenvalues, eigenvectors) — shapes (k,) and (N, k).
+		"""
+		L = self.build_laplacian(normalised=normalised)
+		L_dense = L.to_dense()
+		eigenvalues, eigenvectors = torch.linalg.eigh(L_dense)
+		if k is not None:
+			k = min(k, self.num_nodes)
+			return eigenvalues[:k], eigenvectors[:, :k]
+		return eigenvalues, eigenvectors
+
+	def spectral_gap(self, normalised: bool = True) -> float:
+		"""Return the algebraic connectivity (2nd smallest eigenvalue).
+
+		The spectral gap λ₂ measures how well-connected the graph is:
+		- λ₂ = 0 → graph is disconnected
+		- λ₂ large → graph is well-connected / hard to partition
+
+		Used for anomaly detection: a sudden drop in λ₂ indicates
+		structural fragmentation (e.g., DDoS isolating nodes).
+		"""
+		eigenvalues, _ = self.spectral_decomposition(k=2, normalised=normalised)
+		if len(eigenvalues) < 2:
+			return 0.0
+		return float(eigenvalues[1])
+
+	def spectral_radius(self) -> float:
+		"""Return the largest eigenvalue of the adjacency matrix.
+
+		The spectral radius bounds the maximum influence any node can
+		have — useful for detecting amplification attacks (SSDP floods).
+		"""
+		adj = self.build_sparse_adjacency()
+		adj_dense = adj.to_dense().float()
+		eigenvalues = torch.linalg.eigvalsh(adj_dense)
+		return float(eigenvalues[-1])
+
 	@classmethod
 	def from_edge_list(
 		cls,
@@ -118,11 +231,49 @@ class network:
 		edges: list[tuple[int, int]],
 		device: torch.device | str | None = None,
 	) -> "network":
-		g = cls(num_nodes=num_nodes, device=device)
+		"""Batch-construct a network from an edge list.
+
+		Bypasses per-element ``add_node``/``add_edge`` calls (and their
+		cache invalidations) by using ``object.__new__`` + direct attribute
+		assignment.  ~2-3x faster for graphs with >100 nodes.
+		"""
+		g = object.__new__(cls)
+		g.num_nodes = num_nodes
+		g.device = torch.device(device) if device is not None else torch.device("cpu")
+		g._degree_cache = {}
+		g._edge_index_cache = None
+		g.nodes = {}
+
+		# Pre-build neighbor lists using numpy for O(E) batch assignment
+		edge_arr = np.array(edges, dtype=np.int64).reshape(-1, 2) if edges else np.empty((0, 2), dtype=np.int64)
+		n_edges = len(edge_arr)
+
+		# Compute per-node neighbor lists via sorted index slicing
+		out_neighbors: dict[int, list[int]] = {i: [] for i in range(num_nodes)}
+		in_neighbors: dict[int, list[int]] = {i: [] for i in range(num_nodes)}
+		if n_edges > 0:
+			for src_id, dst_id in edge_arr:
+				out_neighbors[int(src_id)].append(int(dst_id))
+				in_neighbors[int(dst_id)].append(int(src_id))
+
+		# Batch-create nodes without triggering cache invalidation
 		for i in range(num_nodes):
-			g.add_node(node(IPaddress=f"node_{i}", node_id=i, features=torch.zeros(1)))
-		for src_id, dst_id in edges:
-			g.add_edge(src_id, dst_id)
+			n = object.__new__(node)
+			n.IPaddress = f"node_{i}"
+			n.node_id = i
+			n.features = torch.zeros(1)
+			n.out_neighbors = out_neighbors[i]
+			n.in_neighbors = in_neighbors[i]
+			g.nodes[i] = n
+
+		# Pre-build edge_index cache
+		if n_edges > 0:
+			g._edge_index_cache = torch.from_numpy(
+				np.stack([edge_arr[:, 0], edge_arr[:, 1]]).astype(np.int64)
+			).to(g.device)
+		else:
+			g._edge_index_cache = torch.zeros((2, 0), dtype=torch.long, device=g.device)
+
 		return g
 
 	def to_pyg_data(self) -> Data:

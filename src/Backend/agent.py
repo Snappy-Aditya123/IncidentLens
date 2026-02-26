@@ -15,6 +15,7 @@ OpenAI-compatible endpoint: OpenAI, Azure OpenAI, local Ollama, etc.).
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import os
@@ -35,12 +36,13 @@ logger = logging.getLogger(__name__)
 @dataclass
 class AgentConfig:
     """Runtime configuration for the agent."""
-    model: str = os.getenv("OPENAI_MODEL", "gpt-4o")
+    model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     api_key: str = os.getenv("OPENAI_API_KEY", "")
     base_url: str | None = os.getenv("OPENAI_BASE_URL", None)
     max_steps: int = 15          # safety cap on reasoning loop
     temperature: float = 0.1     # low temp for deterministic tool use
-    max_tokens: int = 4096
+    max_tokens: int = 1024       # keep responses concise & fast
+    tool_timeout: float = 5.0    # max seconds per tool call
 
 
 SYSTEM_PROMPT = """\
@@ -101,7 +103,7 @@ def tool_call_event(tool_name: str, arguments: dict) -> dict:
 
 def tool_result_event(tool_name: str, result: str) -> dict:
     # Truncate huge results for the stream (full result still goes to LLM)
-    preview = result[:2000] + "..." if len(result) > 2000 else result
+    preview = result[:800] + "..." if len(result) > 800 else result
     return _event("tool_result", tool=tool_name, result=preview)
 
 
@@ -189,7 +191,13 @@ class IncidentAgent:
 
                 yield tool_call_event(fn_name, fn_args)
 
-                result_str = agent_tools.dispatch(fn_name, fn_args)
+                # Run tool with timeout to avoid blocking on slow ES / network
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(agent_tools.dispatch, fn_name, fn_args)
+                    try:
+                        result_str = future.result(timeout=self.config.tool_timeout)
+                    except concurrent.futures.TimeoutError:
+                        result_str = json.dumps({"error": f"Tool '{fn_name}' timed out after {self.config.tool_timeout}s"})
 
                 yield tool_result_event(fn_name, result_str)
 

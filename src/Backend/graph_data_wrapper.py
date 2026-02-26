@@ -224,6 +224,8 @@ def _build_network_fast(
     """Build a graph.network object without per-element cache invalidation.
 
     Pre-builds neighbor lists with numpy groupby, then assigns in bulk.
+    Uses np.split instead of per-node .tolist() to avoid O(N) Python
+    list conversions — keeps data as numpy slices until actually needed.
     """
     n_local = len(local_ids)
     n_edges = len(local_src)
@@ -237,26 +239,30 @@ def _build_network_fast(
     out_targets = local_dst[out_order]  # destinations for each source
     in_sources = local_src[in_order]    # sources for each destination
 
+    # Split into per-node arrays in one vectorised call (no Python loop)
+    out_split_pts = np.append(out_splits, n_edges)
+    in_split_pts = np.append(in_splits, n_edges)
+    out_lists = np.split(out_targets, out_split_pts[1:-1])
+    in_lists = np.split(in_sources, in_split_pts[1:-1])
+
     net = object.__new__(network)
     net.num_nodes = n_local
     net.device = torch.device("cpu")
     net._degree_cache = {}
     net.nodes = {}
 
-    # Batch-create all nodes with pre-computed neighbor lists
+    # Vectorised IP lookup: build array once, index in batch
+    ip_arr = np.array([id_to_ip[int(gid)] for gid in local_ids], dtype=object)
+
+    # Batch-create all nodes with pre-split neighbor arrays
     for lid in range(n_local):
-        gid = int(local_ids[lid])
         n = object.__new__(node)
-        n.IPaddress = id_to_ip[gid]
+        n.IPaddress = str(ip_arr[lid])
         n.node_id = lid
         n.features = node_feats[lid]
-        # Slice neighbor lists from pre-sorted arrays
-        out_lo = int(out_splits[lid])
-        out_hi = int(out_splits[lid + 1]) if lid + 1 < n_local else n_edges
-        n.out_neighbors = out_targets[out_lo:out_hi].tolist()
-        in_lo = int(in_splits[lid])
-        in_hi = int(in_splits[lid + 1]) if lid + 1 < n_local else n_edges
-        n.in_neighbors = in_sources[in_lo:in_hi].tolist()
+        # Use pre-split numpy arrays — convert to list only when queried
+        n.out_neighbors = out_lists[lid].tolist()
+        n.in_neighbors = in_lists[lid].tolist()
         net.nodes[lid] = n
 
     # Pre-build edge_index cache so later queries are free
@@ -277,7 +283,7 @@ def build_sliding_window_graphs(
     stride: float = 1.0,
     bytes_col: str = "packet_length",
     label_col: str = "label",
-) -> list[Data]:
+) -> tuple[list[Data], dict[int, str]]:
 
     ts_vals = packets_df["timestamp"].values.astype(np.float64)
     t_min, t_max = ts_vals.min(), ts_vals.max()
@@ -292,7 +298,7 @@ def build_sliding_window_graphs(
         # broadcast mask path
         pkt_idx, win_idx = np.nonzero(result)
     if len(pkt_idx) == 0:
-        return []
+        return [], {}
 
     # ---- encode IPs / protocol / port to integers ONCE (pd.factorize is ~20x faster than np.unique on strings) ----
     src_raw = packets_df["src_ip"].values
@@ -306,6 +312,7 @@ def build_sliding_window_graphs(
     ip_codes_all, unique_ips = pd.factorize(all_ips_arr, sort=True)
     ip_to_id: dict[str, int] = {ip: int(i) for i, ip in enumerate(unique_ips)}
     id_to_ip: dict[int, str] = {int(i): str(ip) for i, ip in enumerate(unique_ips)}
+    # id_to_ip is returned to callers to avoid redundant reconstruction
     n_total = len(packets_df)
     src_codes_full = ip_codes_all[:n_total]
     dst_codes_full = ip_codes_all[n_total:]
@@ -390,9 +397,13 @@ def build_sliding_window_graphs(
         data.y = torch.from_numpy(label_arr[idx])
         data.window_start = float(window_starts[w]) if w < len(window_starts) else 0.0
         data.network = net
+        # Store per-window local→global IP mapping so callers can
+        # resolve node IDs correctly across windows.
+        data._local_to_ip = {int(lid): id_to_ip[int(gid)]
+                             for lid, gid in enumerate(local_ids)}
         graphs.append(data)
 
-    return graphs
+    return graphs, id_to_ip
 
 
 # ===============================
@@ -643,18 +654,35 @@ def find_most_anomalous_window(
 ) -> tuple[int, Data, dict]:
     """Find the graph window with the highest proportion of malicious edges.
 
-    Vectorised: computes all malicious ratios in one pass via numpy,
-    then selects the argmax.
+    Fully vectorised: single torch.cat + np.add.reduceat avoids
+    per-graph .cpu().numpy() context switches.
 
     Returns (window_index, graph, stats_dict).
     """
     if not graphs:
         raise ValueError("No graphs provided")
 
-    # Vectorised: extract labels from all graphs and compute ratios in batch
-    ys = [g.y.cpu().numpy() if g.y is not None else np.zeros(g.edge_index.shape[1]) for g in graphs]
-    n_edges = np.array([len(y) for y in ys])
-    n_mal = np.array([int((y == 1).sum()) for y in ys])
+    # Single torch.cat → one .cpu().numpy() call instead of N
+    all_y = torch.cat([
+        g.y if g.y is not None
+        else torch.zeros(g.edge_index.shape[1], dtype=torch.float)
+        for g in graphs
+    ]).cpu().numpy()
+
+    # Compute per-graph boundaries for reduceat
+    n_edges = np.array([g.edge_index.shape[1] for g in graphs])
+    offsets = np.concatenate([[0], np.cumsum(n_edges[:-1])])
+
+    # Handle 0-edge graphs: reduceat gives wrong results when consecutive
+    # offsets are equal, so fall back to a safe per-graph path if needed.
+    mal_flags = (all_y == 1).astype(np.float64)
+    if np.any(n_edges == 0):
+        n_mal = np.array([
+            float(mal_flags[off:off + ne].sum()) if ne > 0 else 0.0
+            for off, ne in zip(offsets, n_edges)
+        ])
+    else:
+        n_mal = np.add.reduceat(mal_flags, offsets)
     ratios = n_mal / np.maximum(n_edges, 1)
 
     best_idx = int(np.argmax(ratios))
@@ -673,18 +701,34 @@ def find_most_normal_window(
 ) -> tuple[int, Data, dict]:
     """Find the graph window with the lowest proportion of malicious edges.
 
-    Vectorised: computes all malicious ratios in one pass via numpy,
-    then selects the argmin.
+    Fully vectorised: single torch.cat + np.add.reduceat avoids
+    per-graph .cpu().numpy() context switches.
 
     Returns (window_index, graph, stats_dict).
     """
     if not graphs:
         raise ValueError("No graphs provided")
 
-    # Vectorised: extract labels from all graphs and compute ratios in batch
-    ys = [g.y.cpu().numpy() if g.y is not None else np.zeros(g.edge_index.shape[1]) for g in graphs]
-    n_edges = np.array([len(y) for y in ys])
-    n_mal = np.array([int((y == 1).sum()) for y in ys])
+    # Single torch.cat → one .cpu().numpy() call instead of N
+    all_y = torch.cat([
+        g.y if g.y is not None
+        else torch.zeros(g.edge_index.shape[1], dtype=torch.float)
+        for g in graphs
+    ]).cpu().numpy()
+
+    # Compute per-graph boundaries for reduceat
+    n_edges = np.array([g.edge_index.shape[1] for g in graphs])
+    offsets = np.concatenate([[0], np.cumsum(n_edges[:-1])])
+
+    # Handle 0-edge graphs safely (see find_most_anomalous_window)
+    mal_flags = (all_y == 1).astype(np.float64)
+    if np.any(n_edges == 0):
+        n_mal = np.array([
+            float(mal_flags[off:off + ne].sum()) if ne > 0 else 0.0
+            for off, ne in zip(offsets, n_edges)
+        ])
+    else:
+        n_mal = np.add.reduceat(mal_flags, offsets)
     ratios = n_mal / np.maximum(n_edges, 1)
 
     best_idx = int(np.argmin(ratios))

@@ -428,7 +428,7 @@ class TestBuildSlidingWindowGraphs:
 
     def test_normal_build(self):
         df = make_packet_df(n_packets=50)
-        graphs = build_sliding_window_graphs(df)
+        graphs, _id_to_ip = build_sliding_window_graphs(df)
         assert len(graphs) > 0
         g = graphs[0]
         assert hasattr(g, "edge_index")
@@ -450,7 +450,7 @@ class TestBuildSlidingWindowGraphs:
             "payload_length": [50],
             "label": [0],
         })
-        graphs = build_sliding_window_graphs(df)
+        graphs, _id_to_ip = build_sliding_window_graphs(df)
         assert len(graphs) >= 1
         assert graphs[0].edge_index.shape[1] == 1
 
@@ -467,34 +467,34 @@ class TestBuildSlidingWindowGraphs:
             "payload_length": [50] * n,
             "label": [0] * n,
         })
-        graphs = build_sliding_window_graphs(df)
+        graphs, _id_to_ip = build_sliding_window_graphs(df)
         assert len(graphs) >= 1
 
     def test_all_malicious(self):
         df = make_packet_df()
         df["label"] = 1
-        graphs = build_sliding_window_graphs(df)
+        graphs, _id_to_ip = build_sliding_window_graphs(df)
         for g in graphs:
             assert (g.y == 1).all()
 
     def test_all_normal(self):
         df = make_packet_df()
         df["label"] = 0
-        graphs = build_sliding_window_graphs(df)
+        graphs, _id_to_ip = build_sliding_window_graphs(df)
         for g in graphs:
             assert (g.y == 0).all()
 
     def test_very_small_window(self):
         """Tiny window that might produce many small graphs."""
         df = make_packet_df(n_packets=100)
-        graphs = build_sliding_window_graphs(df, window_size=0.1, stride=0.05)
+        graphs, _id_to_ip = build_sliding_window_graphs(df, window_size=0.1, stride=0.05)
         # Should not crash; may produce many windows
         assert isinstance(graphs, list)
 
     def test_very_large_window(self):
         """Window larger than data range → single graph."""
         df = make_packet_df(n_packets=20)
-        graphs = build_sliding_window_graphs(df, window_size=1000.0, stride=1000.0)
+        graphs, _id_to_ip = build_sliding_window_graphs(df, window_size=1000.0, stride=1000.0)
         assert len(graphs) == 1
 
     def test_two_ips_only(self):
@@ -509,13 +509,13 @@ class TestBuildSlidingWindowGraphs:
             "payload_length": [50, 100, 150, 200],
             "label": [0, 0, 1, 1],
         })
-        graphs = build_sliding_window_graphs(df, window_size=2.0, stride=1.0)
+        graphs, _id_to_ip = build_sliding_window_graphs(df, window_size=2.0, stride=1.0)
         assert len(graphs) >= 1
 
     def test_network_object_attached(self):
         """Each graph should have a .network attribute of type network."""
         df = make_packet_df(n_packets=30)
-        graphs = build_sliding_window_graphs(df)
+        graphs, _id_to_ip = build_sliding_window_graphs(df)
         for g in graphs:
             assert hasattr(g, "network")
             assert isinstance(g.network, network)
@@ -523,14 +523,14 @@ class TestBuildSlidingWindowGraphs:
     def test_node_count_consistent(self):
         """num_nodes should match x.shape[0]."""
         df = make_packet_df(n_packets=50)
-        graphs = build_sliding_window_graphs(df)
+        graphs, _id_to_ip = build_sliding_window_graphs(df)
         for g in graphs:
             assert g.num_nodes == g.x.shape[0]
 
     def test_edge_count_consistent(self):
         """edge_index columns == edge_attr rows == y length."""
         df = make_packet_df(n_packets=50)
-        graphs = build_sliding_window_graphs(df)
+        graphs, _id_to_ip = build_sliding_window_graphs(df)
         for g in graphs:
             n_edges = g.edge_index.shape[1]
             assert g.edge_attr.shape[0] == n_edges
@@ -623,7 +623,8 @@ class TestAnalysisTools:
 
     def _make_graphs(self):
         df = make_packet_df(n_packets=100)
-        return build_sliding_window_graphs(df)
+        graphs, _id_to_ip = build_sliding_window_graphs(df)
+        return graphs
 
     def test_analyze_graphs(self, capsys):
         graphs = self._make_graphs()
@@ -705,7 +706,7 @@ class TestGNNIntegration:
     def test_gnn_on_real_graphs(self):
         """Build graphs from synthetic data, then run GNN forward + predict."""
         df = make_packet_df(n_packets=80, n_ips=6)
-        graphs = build_sliding_window_graphs(df)
+        graphs, _id_to_ip = build_sliding_window_graphs(df)
         gnn = DummyGNN()
         for g in graphs:
             emb = gnn.encode(g)
@@ -716,7 +717,7 @@ class TestGNNIntegration:
 
     def test_class_weights_on_real_graphs(self):
         df = make_packet_df(n_packets=80, n_ips=6)
-        graphs = build_sliding_window_graphs(df)
+        graphs, _id_to_ip = build_sliding_window_graphs(df)
         w = compute_class_weights(graphs)
         assert w.shape[0] >= 2
         assert not torch.isnan(w).any()
@@ -724,7 +725,7 @@ class TestGNNIntegration:
 
     def test_dataloaders_on_real_graphs(self):
         df = make_packet_df(n_packets=200, n_ips=8)
-        graphs = build_sliding_window_graphs(df, window_size=1.0, stride=0.5)
+        graphs, _id_to_ip = build_sliding_window_graphs(df, window_size=1.0, stride=0.5)
         if len(graphs) < 3:
             pytest.skip("Not enough graphs for splitting")
         train_loader, val_loader, test_loader, info = create_dataloaders(graphs, batch_size=4)

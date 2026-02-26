@@ -136,8 +136,8 @@ def load_ndjson_files(
 # 2. RAW PACKET INDEXING (individual packets → ES)
 # ===================================================================
 
-# Index name for raw packets (separate from aggregated flows)
-RAW_PACKETS_INDEX = "incidentlens-packets"
+# Index name for raw packets — shared constant from wrappers
+RAW_PACKETS_INDEX = wrappers.RAW_PACKETS_INDEX
 
 RAW_PACKETS_MAPPING = {
     "mappings": {

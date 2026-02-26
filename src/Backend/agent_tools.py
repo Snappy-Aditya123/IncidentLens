@@ -194,17 +194,32 @@ def _tool_significant_terms(
 
 @_register("counterfactual_analysis")
 def _tool_counterfactual(flow_id: str, **kwargs) -> dict:
-    """Find the nearest normal flow and compute feature diffs."""
+    """Find the nearest normal flow and compute feature diffs.
+
+    Uses ES msearch to batch the embedding + flow doc retrieval into
+    a single HTTP round-trip (down from 2 sequential calls).
+    """
     es = wrappers.get_client()
 
-    # get the flow's embedding
-    body = {"query": {"term": {"flow_id": flow_id}}, "size": 1}
-    resp = es.search(index=wrappers.EMBEDDINGS_INDEX, body=body)
-    hits = resp["hits"]["hits"]
-    if not hits:
+    # Batch: fetch embedding + anomalous flow doc in one round-trip via msearch
+    try:
+        resp = es.msearch(body=[
+            {"index": wrappers.EMBEDDINGS_INDEX},
+            {"query": {"term": {"flow_id": flow_id}}, "size": 1},
+            {"index": wrappers.FLOWS_INDEX},
+            {"query": {"term": {"_id": flow_id}}, "size": 1},
+        ])
+        emb_hits = resp["responses"][0]["hits"]["hits"]
+    except Exception:
+        # Fallback: sequential search if msearch fails
+        body = {"query": {"term": {"flow_id": flow_id}}, "size": 1}
+        emb_resp = es.search(index=wrappers.EMBEDDINGS_INDEX, body=body)
+        emb_hits = emb_resp["hits"]["hits"]
+
+    if not emb_hits:
         return {"error": f"No embedding found for flow {flow_id}"}
 
-    emb = hits[0]["_source"]["embedding"]
+    emb = emb_hits[0]["_source"]["embedding"]
     cf = wrappers.build_and_index_counterfactual(
         anomalous_flow_id=flow_id,
         query_embedding=emb,
@@ -266,7 +281,7 @@ def _tool_search_packets(
 
     query = {"bool": {"must": must}} if must else {"match_all": {}}
     resp = es.search(
-        index="incidentlens-packets",
+        index=wrappers.RAW_PACKETS_INDEX,
         body={"query": query, "size": size, "sort": [{"timestamp": "asc"}]},
     )
     packets = [h["_source"] for h in resp["hits"]["hits"]]
@@ -353,6 +368,52 @@ def _tool_graph_window_compare(window_a: int | None = None, window_b: int | None
         return {"error": f"Window B={window_b} out of range (0-{len(graphs)-1})"}
 
     return wrappers.graph_window_comparison(graphs, window_a=window_a, window_b=window_b)
+
+
+# ──────────────────────────────────────────────
+# 13b. Graph spectral analysis (structural anomaly detection)
+# ──────────────────────────────────────────────
+
+@_register("graph_spectral_analysis")
+def _tool_spectral_analysis(top_k: int = 5, **kwargs) -> dict:
+    """Analyse graph windows using spectral properties from ES.
+
+    Queries the graph-summaries index for windows with the lowest
+    spectral gap (algebraic connectivity) — structural fragmentation
+    indicators that correlate with DDoS or network isolation attacks.
+    Also identifies windows with highest spectral radius (amplification).
+    """
+    es = wrappers.get_client()
+    try:
+        # Find windows with lowest spectral gap (most fragmented)
+        fragmented = es.search(
+            index=wrappers.GRAPH_SUMMARIES_INDEX,
+            body={
+                "size": top_k,
+                "sort": [{"spectral_gap": {"order": "asc"}}],
+                "_source": True,
+            },
+        )
+        # Find windows with highest spectral radius (amplification)
+        amplified = es.search(
+            index=wrappers.GRAPH_SUMMARIES_INDEX,
+            body={
+                "size": top_k,
+                "sort": [{"spectral_radius": {"order": "desc"}}],
+                "_source": True,
+            },
+        )
+        return {
+            "most_fragmented_windows": [h["_source"] for h in fragmented["hits"]["hits"]],
+            "highest_amplification_windows": [h["_source"] for h in amplified["hits"]["hits"]],
+            "explanation": (
+                "spectral_gap (λ₂) measures graph connectivity — low values indicate "
+                "structural fragmentation. spectral_radius measures maximum node influence — "
+                "high values indicate amplification potential (e.g., SSDP floods)."
+            ),
+        }
+    except Exception as e:
+        return {"error": f"Spectral analysis failed: {e}"}
 
 
 # ──────────────────────────────────────────────
@@ -775,6 +836,20 @@ TOOL_SCHEMAS: list[dict] = [
                     "size": {"type": "integer", "description": "Max results (default 10)"},
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "graph_spectral_analysis",
+            "description": "Analyse graph windows using spectral properties (algebraic connectivity, spectral radius). Finds structurally fragmented windows (low λ₂ — indicates DDoS/isolation) and high-amplification windows (high spectral radius — indicates SSDP floods). Uses the algebraic graph Laplacian for mathematical characterisation.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "top_k": {"type": "integer", "description": "Number of top windows to return (default 5)"},
+                },
+                "required": [],
             },
         },
     },
