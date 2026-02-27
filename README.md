@@ -8,9 +8,10 @@
 [![Elasticsearch 8.12](https://img.shields.io/badge/Elasticsearch-8.12-005571?logo=elasticsearch&logoColor=white)](https://elastic.co)
 [![PyTorch Geometric](https://img.shields.io/badge/PyTorch%20Geometric-2.6-EE4C2C?logo=pytorch&logoColor=white)](https://pyg.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![OpenAI](https://img.shields.io/badge/OpenAI-gpt--4o--mini-412991?logo=openai&logoColor=white)](https://platform.openai.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**IncidentLens** doesn't just detect threats — it *explains* them. An autonomous AI agent that investigates network anomalies, uncovers root causes through counterfactual reasoning, and delivers actionable intelligence in real time.
+**IncidentLens** doesn't just detect threats — it *explains* them. A real-time streaming engine that ingests network packets, builds temporal graphs, scores anomalies with GNNs, and autonomously investigates elevated threats using an LLM reasoner with tool-calling — delivering actionable intelligence and email alerts as incidents unfold.
 
 [Getting Started](#-getting-started) · [How It Works](#-how-it-works) · [API Reference](#-api-reference) · [Architecture](#-architecture)
 
@@ -26,24 +27,28 @@ Analysts spend hours manually correlating logs, comparing traffic patterns, and 
 
 ## Our Solution
 
-IncidentLens is an **autonomous investigation agent** that combines three powerful capabilities:
+IncidentLens is an **end-to-end real-time investigation system** that combines four powerful capabilities:
 
 | Capability | What It Does |
 |:---|:---|
+| **Real-Time Streaming Engine** | Ingests raw packets via `StreamSimulator`, aggregates them into time-windowed flows, and processes each window through the full graph + GNN + ES + LLM pipeline as it closes |
 | **Graph Neural Networks** | Models network traffic as temporal graphs — nodes are IPs, edges are flows — to capture structural patterns invisible to flat feature analysis |
-| **Counterfactual Explainability** | For every anomaly, finds the *nearest normal flow* and tells you exactly which features (packet count, byte volume, inter-arrival time) would need to change and by how much |
-| **Elasticsearch-Powered Retrieval** | kNN vector search over flow embeddings, significant-terms aggregation, and feature distribution analysis — all powering a multi-step LLM reasoning loop |
+| **LLM Autonomous Reasoner** | An OpenAI-powered agent with 5 investigation tools (flow lookup, graph summary, severity breakdown, recent windows, email alerts) that autonomously investigates any window with an anomaly score >= 0.5 |
+| **Elasticsearch-Powered Retrieval** | kNN vector search over flow embeddings, significant-terms aggregation, severity breakdowns, and graph summary indexing — powering both the LLM reasoner and the interactive dashboard |
 
-The agent doesn't just say "this is malicious" — it says *"this flow has 47x the normal packet count, 12x the byte volume, and the nearest non-attack flow with similar structure is X; reducing packet_count from 450 to 9 would flip the classification."*
+The system doesn't just say "this is malicious" — it streams real-time analysis like *"Window 12 has anomaly score 0.78; 3 flows from 192.168.100.5 show 47x normal packet count targeting SSDP ports; recommend blocking source IP."* and sends email alerts for high/critical findings.
 
 ---
 
 ## Key Features
 
-- **Autonomous Multi-Step Investigation** — An LLM agent with 19 specialized tools iterates through detection → analysis → explanation → severity assessment → recommendation, streaming each reasoning step in real time
+- **Real-Time Streaming Pipeline** — `StreamSimulator` replays packets at configurable rates, aggregates them into time windows, and feeds each window through graph construction → ES indexing → GNN scoring → LLM investigation. No batch preprocessing required.
+- **Autonomous LLM Reasoner** — An `AsyncOpenAI` agent (gpt-4o-mini by default) with 5 specialized tools iterates through investigation steps autonomously via tool-calling, stores insights to Elasticsearch, and sends SMTP email alerts for high/critical-risk findings
+- **Autonomous Multi-Step Investigation** — A separate LLM agent with 19 specialized tools for the interactive dashboard iterates through detection → analysis → explanation → severity assessment → recommendation, streaming each reasoning step via WebSocket
 - **Temporal Graph Construction** — Sliding-window graph builder converts raw packets into PyG `Data` objects with node features (degree, traffic volume) and edge features (packet count, bytes, payload, inter-arrival time)
-- **Dual GNN Architecture** — EdgeGNN (GraphSAGE + Edge MLP) for static classification, EvolveGCN-O (LSTM-evolved weights) for temporal patterns, and Neural ODE variant (EvolvingGNN_ODE with RK4 solver) for continuous-time weight evolution
+- **Dual GNN Architecture** — EvolveGCN-O (LSTM-evolved weights) for temporal patterns and Neural ODE variant (EvolvingGNN_ODE with RK4 solver) for continuous-time weight evolution. Trainable via CLI with CSV or NDJSON input.
 - **Counterfactual Analysis** — Feature-level diffs ("what would need to change?") and graph-level edge perturbation ("which connections drive the anomaly?")
+- **SMTP Email Alerts** — Automatic email notifications via Gmail SMTP for high/critical risk findings detected by the LLM reasoner
 - **Real-Time WebSocket Streaming** — Every thinking step, tool call, and conclusion is streamed to the frontend as it happens
 - **Interactive Investigation Dashboard** — React 19 + Vite 6 frontend with Error Boundary, a 4-step guided wizard (Overview → ES Logs → Network Graph → Counterfactual Explainability), shadcn/ui components, Tailwind v4 dark theme, 12 typed React hooks with mock fallback, and 20 typed API functions
 - **Kitsune Dataset Validated** — Tested on 4M+ real SSDP flood attack packets with ground-truth labels
@@ -52,23 +57,66 @@ The agent doesn't just say "this is malicious" — it says *"this flow has 47x t
 
 ## How It Works
 
+### Real-Time Streaming Architecture (Primary)
+
+```
+  NDJSON Packets
+       │
+       ▼
+┌──────────────────┐
+│  StreamSimulator  │  rate / realtime replay modes
+│  (simulation.py)  │  configurable pps + window size
+└───────┬──────────┘
+        │ window closes -> flows emitted
+        ▼
+┌──────────────────────────────┐
+│  RealTimeIncidentLens        │  (process_pipeline.py)
+│                              │
+│  1. Build temporal graphs    │  wrappers.build_and_index_graphs()
+│  2. Generate embeddings      │  wrappers.generate_embeddings()
+│  3. Index to Elasticsearch   │  wrappers.index_embeddings()
+│  4. GNN anomaly scoring      │  graph.pred_scores (sigmoid)
+│  5. Severity aggregation     │  wrappers.aggregate_severity_breakdown()
+│  6. LLM trigger (>= 0.5)    │
+│     └─> LLMReasoner          │  (llm_reasoner.py)
+│         ├─ get_flow_details  │
+│         ├─ get_graph_summary │
+│         ├─ get_severity      │
+│         ├─ get_recent_windows│
+│         ├─ send_email_alert  │  SMTP (Gmail)
+│         └─> store insight    │  -> incidentlens-llm-insights
+└──────────────┬───────────────┘
+               ▼
+     ┌───────────────────────┐
+     │   Elasticsearch 8.12  │
+     │                       │
+     │  incidentlens-flows   │  aggregated flow features
+     │  ...-embeddings       │  kNN vector search (cosine)
+     │  ...-counterfactuals  │  feature diffs + explanations
+     │  ...-graph-summaries  │  per-window graph metadata
+     │  ...-llm-insights     │  LLM reasoning results
+     └───────────────────────┘
+```
+
+### Interactive Investigation Dashboard
+
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │  React Frontend (Dashboard + 4-Step Investigation Wizard)        │
 │  ┌────────────┐  ┌──────────────┐  ┌──────────┐  ┌───────────┐  │
-│  │  Overview   │→ │ ES Log View  │→ │ D3 Graph │→ │Counterfact│  │
+│  │  Overview   │->│ ES Log View  │->│ D3 Graph │->│Counterfact│  │
 │  └────────────┘  └──────────────┘  └──────────┘  └───────────┘  │
 └───────────────────────┬──────────────────────────────────────────┘
                         │ REST + WebSocket
                         ▼
               ┌─────────────────────┐
-              │  FastAPI Server      │
-              │  (REST + WS stream)  │
+              │  FastAPI Server      │  21 REST + 1 WS endpoint
+              │  (server.py)         │
               └──────┬───────────────┘
                      │
               ┌──────▼──────────────┐
-              │     LLM Agent       │ ◄── OpenAI / Azure / Ollama
-              │  (Multi-Step Loop)  │
+              │  Investigation Agent │ <-- OpenAI / Azure / Ollama
+              │  (agent.py)          │     19 tools via agent_tools.py
               └──────┬──────────────┘
                      │ tool calls
         ┌────────────┼────────────────┐
@@ -80,17 +128,12 @@ The agent doesn't just say "this is malicious" — it says *"this flow has 47x t
         │             │               │
         └─────────────┼───────────────┘
                       ▼
-          ┌───────────────────────┐
-          │   Elasticsearch 8.12  │
-          │                       │
-          │  ▸ incidentlens-flows │  ← aggregated flow features
-          │  ▸ ...-embeddings     │  ← kNN vector search (cosine)
-          │  ▸ ...-counterfactuals│  ← feature diffs + explanations
-          │  ▸ ...-packets        │  ← raw packet records
-          └───────────────────────┘
+            Elasticsearch 8.12
 ```
 
-**Investigation loop:** The frontend walks analysts through a 4-step guided wizard. The backend agent detects anomalies → retrieves flow details → runs counterfactual analysis (kNN nearest-normal + feature diff) → assesses severity → finds similar incidents → streams each reasoning step back to the UI in real time via WebSocket.
+**Real-time loop:** Packets flow into `StreamSimulator` → aggregated into time windows → each closed window triggers `RealTimeIncidentLens.process_window()` which builds graphs, generates embeddings, scores with the GNN, and if `anomaly_score >= 0.5`, the `LLMReasoner` autonomously investigates using tool-calling and stores insights to Elasticsearch. For high/critical risk, it sends email alerts via SMTP.
+
+**Interactive loop:** The frontend walks analysts through a 4-step guided wizard. The backend agent detects anomalies → retrieves flow details → runs counterfactual analysis (kNN nearest-normal + feature diff) → assesses severity → finds similar incidents → streams each reasoning step back to the UI in real time via WebSocket.
 
 ---
 
@@ -101,7 +144,19 @@ The agent doesn't just say "this is malicious" — it says *"this flow has 47x t
 - Python 3.12+
 - Node.js 18+ and npm (for the React frontend)
 - Docker (for Elasticsearch + Kibana)
-- An OpenAI-compatible API key (OpenAI, Azure OpenAI, or local Ollama)
+- An OpenAI API key (for the LLM reasoner and investigation agent)
+
+### Environment Variables
+
+| Variable | Required | Description |
+|:---------|:---------|:------------|
+| `OPENAI_API_KEY` | Yes | OpenAI API key (or set `OPENAI_BASE_URL` for Ollama/Azure) |
+| `OPENAI_MODEL` | No | Model name (default: `gpt-4o-mini`) |
+| `OPENAI_BASE_URL` | No | Custom API base URL for local models |
+| `ALERT_EMAIL_SENDER` | No | Gmail address for SMTP alerts |
+| `ALERT_EMAIL_PASSWORD` | No | Gmail App Password (not your regular password) |
+| `ALERT_EMAIL_RECIPIENT` | No | Email address to receive alerts |
+| `INCIDENTLENS_CORS_ORIGINS` | No | Comma-separated allowed origins (default: `http://localhost:5173,http://localhost:3000`) |
 
 ### 1. Clone & Install
 
@@ -127,45 +182,83 @@ Elasticsearch: http://localhost:9200 · Kibana: http://localhost:5601
 ### 3. Verify Connectivity
 
 ```bash
-python src/Backend/main.py health
+python -m src.Backend.cli health
 ```
 
 ### 4. Prepare Data
 
 ```bash
-# Convert CSV → NDJSON (first time only)
-python src/Backend/main.py convert \
+# Convert CSV -> NDJSON (first time only)
+python -m src.Backend.cli convert \
   --packets path/to/ssdp_packets_rich.csv \
   --labels path/to/SSDP_Flood_labels.csv
-
-# Run full ingestion + analysis pipeline
-python src/Backend/main.py ingest
 ```
 
-### 5. Investigate
+### 5. Train the GNN (Optional but Recommended)
 
 ```bash
-export OPENAI_API_KEY=sk-...
+# From CSV files directly
+python -m src.Backend.cli train \
+  --packets path/to/ssdp_packets_rich.csv \
+  --labels path/to/SSDP_Flood_labels.csv \
+  --epochs 30 --hidden-dim 64
+
+# Or from NDJSON directory
+python -m src.Backend.cli train --data-dir data/ --epochs 30
+```
+
+The trained model is saved to `models/temporal_gnn.pt` and automatically loaded by the real-time engine.
+
+### 6. Run Real-Time Streaming (Primary Mode)
+
+```bash
+set OPENAI_API_KEY=sk-...
+
+# Stream packets through the full pipeline
+python -m src.Backend.process_pipeline \
+  --ndjson data/packets_0000.json \
+  --rate 500 \
+  --window-size 5.0 \
+  --debug
+
+# Or use the CLI simulate command (loads all data from --data-dir)
+python -m src.Backend.cli simulate \
+  --rate 200 --window-size 5.0 --mode rate
+```
+
+Each window is processed: graphs built → flows indexed → embeddings generated → GNN scored → LLM investigates (if score >= 0.5) → insights stored → email alerts sent (if high/critical).
+
+### 7. Batch Ingestion (Alternative)
+
+```bash
+# Run full batch ingestion + analysis pipeline
+python -m src.Backend.cli ingest
+```
+
+### 8. Interactive Investigation
+
+```bash
+set OPENAI_API_KEY=sk-...
 
 # Auto-detect and investigate anomalies
-python src/Backend/main.py investigate
+python -m src.Backend.cli investigate
 
 # Ask a specific question
-python src/Backend/main.py investigate "why is 192.168.100.5 anomalous?"
+python -m src.Backend.cli investigate "why is 192.168.100.5 anomalous?"
 ```
 
-### 6. Start the API Server
+### 9. Start the API Server
 
 ```bash
-python src/Backend/main.py serve --port 8000
+python -m src.Backend.cli serve --port 8000
 ```
 
-### 7. Start the Frontend
+### 10. Start the Frontend
 
 ```bash
 cd src/Front
 npm install
-npm run dev          # → http://localhost:5173
+npm run dev          # -> http://localhost:5173
 ```
 
 The Vite dev server proxies `/api` and `/ws` requests to the backend at `localhost:8000`, so both servers can run simultaneously in development. In production, build the frontend with `npm run build` and serve the resulting `dist/` directory from any static host (e.g., Nginx, Vercel, or a CDN). The FastAPI server does **not** serve static files — you need a separate static host or a reverse proxy.
@@ -179,32 +272,31 @@ The Vite dev server proxies `/api` and `/ws` requests to the backend at `localho
 ```
 IncidentLens/
 ├── src/
-│   ├── Backend/                        # Python backend (1 933-line ES wrapper, 831-line agent)
-│   │   ├── main.py                     # CLI shim → imports from tests/testingentry.py
+│   ├── Backend/
+│   │   ├── process_pipeline.py         # Real-time streaming engine (RealTimeIncidentLens + CLI)
+│   │   ├── llm_reasoner.py             # Autonomous LLM agent with 5 tools + SMTP email alerts
+│   │   ├── simulation.py               # StreamSimulator -- rate/realtime packet windowing
+│   │   ├── cli.py                      # Unified CLI (7 commands: health, ingest, investigate, serve, convert, train, simulate)
+│   │   ├── main.py                     # CLI shim -> cli.py
 │   │   ├── agent.py                    # LLM agent — multi-step reasoning loop
 │   │   ├── agent_tools.py              # 19 tools with OpenAI function-calling schemas
 │   │   ├── server.py                   # FastAPI server (21 REST + 1 WS endpoint)
-│   │   ├── wrappers.py                 # ES client — 53 functions: indexing, kNN, ILM, runtime fields, pagination
+│   │   ├── wrappers.py                 # ES client -- 55+ functions: indexing, kNN, ILM, graph summaries, retrieval helpers
 │   │   ├── graph_data_wrapper.py       # Vectorised sliding-window graph builder (numpy)
 │   │   ├── graph.py                    # Core graph data structures (numpy-vectorised)
-│   │   ├── train.py                    # EdgeGNN (GraphSAGE) training pipeline
-│   │   ├── temporal_gnn.py             # EvolveGCN-O semi-temporal model
+│   │   ├── temporal_gnn.py             # EvolveGCN-O + Neural ODE temporal models + training
 │   │   ├── gnn_interface.py            # Abstract GNN encoder contract
-│   │   ├── ingest_pipeline.py          # 8-step data ingestion pipeline
-│   │   ├── csv_to_json.py              # CSV → NDJSON converter
-│   │   ├── GNN.py                      # (Deprecated) standalone EdgeGNN ref
+│   │   ├── backfill.py                 # NDJSON loader + backfill utilities
+│   │   ├── csv_to_json.py             # CSV -> NDJSON converter
 │   │   ├── __init__.py
 │   │   ├── backup/                     # Earlier model versions kept for reference
-│   │   │   ├── temporal_gnn_v1_backup.py
-│   │   │   └── __init__.py
-│   │   └── tests/                      # 316 tests (100% pass)
-│   │       ├── testingentry.py         # Actual CLI implementation (5 commands)
-│   │       ├── test_gnn_edge_cases.py  # Graph construction, GNN, normalization
-│   │       ├── test_temporal_gnn_full.py  # EvolveGCN-O training, temporal sequences
-│   │       ├── test_temporal_gnn_meticulous.py  # Edge-case coverage
-│   │       ├── test_csv_to_json.py     # CSV converter: safe_val, merge, NDJSON, metadata
-│   │       ├── test_agent_tools.py     # Agent tool registry, dispatch, sanitization
-│   │       ├── test_e2e_pipeline.py    # Full pipeline: CSV→graphs→GNN→predict
+│   │   └── tests/                      # Test suites
+│   │       ├── test_gnn_edge_cases.py
+│   │       ├── test_temporal_gnn_full.py
+│   │       ├── test_temporal_gnn_meticulous.py
+│   │       ├── test_csv_to_json.py
+│   │       ├── test_agent_tools.py
+│   │       ├── test_e2e_pipeline.py
 │   │       ├── run_all.py              # Unified test runner (unittest + pytest)
 │   │       └── __init__.py
 │   ├── Front/                          # React frontend
@@ -218,7 +310,7 @@ IncidentLens/
 │   │   │   ├── routes.tsx               # Route definitions
 │   │   │   ├── types.ts                 # Shared UI + backend response types
 │   │   │   ├── services/api.ts          # Typed fetch client + WebSocket stream
-│   │   │   ├── hooks/useApi.ts          # 8 hooks — live API with mock fallback
+│   │   │   ├── hooks/useApi.ts          # 12 hooks -- live API with mock fallback
 │   │   │   ├── components/
 │   │   │   │   ├── Dashboard.tsx         # Incident list + stats (live data)
 │   │   │   │   ├── Investigation.tsx     # 4-step wizard (live data)
@@ -226,21 +318,17 @@ IncidentLens/
 │   │   │   │   │   ├── ElasticsearchStep.tsx  # ES log analysis
 │   │   │   │   │   ├── GNNStep.tsx            # D3 network graph
 │   │   │   │   │   └── CounterfactualStep.tsx # Explainability
-│   │   │   │   └── ui/                  # 46 shadcn/ui components + utilities
-│   │   │   └── data/mockData.ts         # Mock data for offline fallback
-│   │   ├── styles/                      # Tailwind v4 + oklch theme tokens
-│   │   ├── vite-env.d.ts                # Vite type references
-│   │   └── __init__.py
+│   │   │   │   └── ui/                  # shadcn/ui components
+│   │   │   └── data/mockData.ts
+│   │   └── styles/                      # Tailwind v4 + oklch theme tokens
 │   └── docker-compose.yml               # ES 8.12 + Kibana 8.12 + backend + frontend
-├── .github/workflows/ci.yml             # GitHub Actions CI (backend-test, frontend-build, docker-lint)
-├── .dockerignore                        # Excludes .venv, node_modules, tests, data from Docker builds
-├── .gitignore                           # Ignores .venv, __pycache__, dist/, node_modules/, *.csv
 ├── Dockerfile.backend                   # Python 3.12-slim + torch 2.6.0 CPU + healthcheck
-├── Dockerfile.frontend                  # Node 20-alpine build → nginx:alpine serve
-├── data/                                # NDJSON data files
-├── EDA/                                 # Exploratory data analysis (Jupyter notebooks)
+├── Dockerfile.frontend                  # Node 20-alpine build -> nginx:alpine serve
+├── data/                                # NDJSON data files (packets_0000..0040.json)
+├── models/                              # GNN checkpoints (temporal_gnn.pt) -- created by train
+├── EDA/
 │   └── EDA.ipynb                        # Dataset profiling and visualization
-├── requirements.txt                     # Python dependencies (pip install -r)
+├── requirements.txt
 └── LICENSE                              # MIT
 ```
 
@@ -279,13 +367,15 @@ IncidentLens/
 |:---------|:------------|
 | `WS /ws/investigate` | Stream investigation events in real time |
 
-**Protocol:** Connect → send `{"query": "..."}` → receive streaming events → receive `{"type": "done"}`.
+**Protocol:** Connect -> send `{"query": "..."}` -> receive streaming events -> receive `{"type": "done"}`.
 
 Event types: `thinking`, `tool_call`, `tool_result`, `conclusion`, `error`, `status`, `done`.
 
 ---
 
-## Agent Tools (19)
+## Investigation Agent Tools (19)
+
+The interactive investigation agent (`agent.py`) uses 19 tools exposed via `agent_tools.py` for the dashboard and CLI:
 
 | Tool | Purpose |
 |:-----|:--------|
@@ -311,45 +401,66 @@ Event types: `thinking`, `tool_call`, `tool_result`, `conclusion`, `error`, `sta
 
 ---
 
+## LLM Reasoner Tools (5)
+
+The real-time autonomous reasoner (`llm_reasoner.py`) uses 5 focused tools for per-window investigation:
+
+| Tool | Purpose |
+|:-----|:--------|
+| `get_flow_details` | Look up a specific flow document from Elasticsearch by flow_id |
+| `get_graph_summary` | Retrieve the graph summary for a specific window_id |
+| `get_severity_breakdown` | Get severity distribution across all indexed flows |
+| `get_recent_windows` | Retrieve recent graph summaries for trend analysis |
+| `send_email_alert` | Send an SMTP email alert for high/critical findings (Gmail) |
+
+---
+
 ## Elasticsearch Indices
 
-| Index | Contents |
-|:------|:---------|
-| `incidentlens-flows` | Aggregated flow features — packet_count, total_bytes, mean_payload, mean_iat, std_iat, label, predictions |
-| `incidentlens-embeddings` | Per-flow embedding vectors (dense_vector with cosine similarity, kNN-indexed) |
-| `incidentlens-counterfactuals` | Counterfactual diffs — per-feature original vs CF value, direction, percent change |
-| `incidentlens-packets` | Raw individual packet records from the dataset |
-
-> The 4th index (`incidentlens-packets`) is created and populated by `ingest_pipeline.py`. The mapping includes: `packet_index`, `timestamp`, `inter_arrival_time`, `src_ip`, `dst_ip`, `src_port`, `dst_port`, `protocol`, `ttl`, `ip_header_len`, `tcp_flags`, `udp_length`, `payload_length`, `packet_length`, `label`.
+| Index | Contents | Created By |
+|:------|:---------|:-----------|
+| `incidentlens-flows` | Aggregated flow features -- packet_count, total_bytes, mean_payload, mean_iat, std_iat, label, predictions | `wrappers.py` (both batch + real-time) |
+| `incidentlens-embeddings` | Per-flow embedding vectors (dense_vector with cosine similarity, kNN-indexed) | `wrappers.py` |
+| `incidentlens-counterfactuals` | Counterfactual diffs -- per-feature original vs CF value, direction, percent change | `wrappers.py` (batch mode) |
+| `incidentlens-graph-summaries` | Per-window graph metadata -- node/edge counts, anomaly scores, IP mappings | `wrappers.py` (real-time) |
+| `incidentlens-llm-insights` | LLM reasoning results -- risk level, summary, recommendations, tool calls | `llm_reasoner.py` (real-time) |
 
 ---
 
 ## Technical Highlights
 
-- **Vectorized graph construction** — Pure numpy sliding-window builder with composite key packing, broadcast window assignment, and pre-built neighbor lists. Zero Python for-loops over packets. `build_edge_index()` uses pre-allocated numpy arrays; `build_window_data()` uses `argsort`+`searchsorted` for window splitting.
-- **Vectorized analysis** — Edge perturbation counterfactuals use batch `(T,F)` matrix ops and sum-of-squares update formulas instead of per-edge recomputation. Window comparison, anomalous/normal window finding, and severity z-scores all use numpy vectorized operations.
-- **Dual GNN models** — EdgeGNN (GraphSAGE + Edge MLP) for static edge classification; EvolveGCN-O (LSTM-evolved GCN weights) for temporal pattern detection; Neural ODE variant (RK4 default) for continuous-time weight evolution.
-- **Pre-processed GNN bottleneck removal** — Self-loops and degree normalization cached at data-prep time; LSTM weight evolution flattened from O(hidden_dim) batches to O(1).
-- **ES-native analytics** — Runtime severity fields (Painless scripts), ILM lifecycle policies, ingest pipelines for NaN cleanup, index templates, composite aggregations with cursor pagination, search_after + PIT pagination, and full-text counterfactual narrative search.
-- **Singleton ES client** with thread-safe initialization (`threading.Lock`), retry logic, bulk indexing with batch MD5 flow-ID generation, and pre-converted numpy→Python type coercion for minimal per-document overhead. Checkpoint loading uses `weights_only=True` to prevent arbitrary code execution.
-- **Thread-safe caching** — detect results cache and feature-stats cache both protected by `threading.Lock`, with TOCTOU-safe read-check-compute-write inside the lock.
-- **CI/CD pipeline** — GitHub Actions with 3 jobs: backend tests (Python 3.12, CPU PyTorch 2.6.0 + PyG), frontend build (Node 20, TypeScript check, Vite build), Docker lint (hadolint).
-- **Docker hardened** — `.dockerignore` excludes test/dev files, backend Dockerfile has `HEALTHCHECK`, `torch==2.6.0` pinned, frontend uses `npm ci` for deterministic builds, Compose uses `condition: service_healthy` for service ordering.
-- **316 tests** (95 unittest + 221 pytest) across 6 test suites — covering graph construction, GNN forward/backward passes, temporal sequences, normalization, edge-case handling, CSV-to-JSON conversion, agent tool dispatch/registry/sanitization, and full end-to-end pipeline integration — all passing. CI/CD via GitHub Actions (backend tests, frontend build, Docker lint).
-- **Full-stack integration** — Typed API service layer (`services/api.ts`) with 20 typed functions (19 REST + 1 WebSocket async-generator), and 12 React hooks (`useBackendHealth`, `useIncidents`, `useIncident`, `useElasticsearchData`, `useNetworkGraph`, `useCounterfactual`, `useSeverity`, `useInvestigationStream`, `useSeverityBreakdown`, `useMLAnomalies`, `useMLInfluencers`, `useCounterfactualSearch`) that try the live backend first and fall back to mock data for offline development.
-- **Zero-config dev proxy** — Vite dev server on `:5173` proxies `/api` and `/ws` to the FastAPI backend on `:8000`, so frontend and backend can be developed and run simultaneously with no CORS issues.
+- **Real-time streaming architecture** -- `StreamSimulator` replays packets at configurable rates (pps or wall-clock realtime), aggregates into windows, and triggers the full pipeline per-window: graph construction -> ES indexing -> GNN scoring -> LLM investigation -> email alerting. Async end-to-end via `asyncio`.
+- **Autonomous LLM reasoner** -- `AsyncOpenAI` tool-calling loop (max 5 iterations) that investigates each anomalous window, selects tools dynamically, stores structured insights to Elasticsearch, and sends SMTP email alerts for high/critical risk.
+- **Vectorized graph construction** -- Pure numpy sliding-window builder with composite key packing, broadcast window assignment, and pre-built neighbor lists. Zero Python for-loops over packets.
+- **Dual GNN models** -- EvolveGCN-O (LSTM-evolved GCN weights) for temporal pattern detection; Neural ODE variant (RK4 default) for continuous-time weight evolution. Trainable via `python -m src.Backend.cli train`.
+- **Pre-processed GNN bottleneck removal** -- Self-loops and degree normalization cached at data-prep time; LSTM weight evolution flattened from O(hidden_dim) batches to O(1).
+- **ES-native analytics** -- Runtime severity fields (Painless scripts), ILM lifecycle policies, ingest pipelines for NaN cleanup, index templates, composite aggregations with cursor pagination, search_after + PIT pagination, and full-text counterfactual narrative search.
+- **Singleton ES client** with thread-safe initialization (`threading.Lock`), retry logic, bulk indexing with batch MD5 flow-ID generation, and pre-converted numpy->Python type coercion for minimal per-document overhead. Checkpoint loading uses `weights_only=True` to prevent arbitrary code execution.
+- **Docker hardened** -- `.dockerignore` excludes test/dev files, backend Dockerfile has `HEALTHCHECK`, `torch==2.6.0` pinned, frontend uses `npm ci` for deterministic builds, Compose uses `condition: service_healthy` for service ordering.
+- **Full-stack integration** -- Typed API service layer (`services/api.ts`) with 20 typed functions (19 REST + 1 WebSocket async-generator), and 12 React hooks that try the live backend first and fall back to mock data for offline development.
+- **Zero-config dev proxy** -- Vite dev server on `:5173` proxies `/api` and `/ws` to the FastAPI backend on `:8000`, so frontend and backend can be developed and run simultaneously with no CORS issues.
 
 ---
 
 ## CLI Reference
 
+All commands can be run via `python -m src.Backend.cli <command>` or `python src/Backend/main.py <command>`.
+
 | Command | Description |
 |:--------|:------------|
-| `python src/Backend/main.py health` | Check ES connectivity and index document counts |
-| `python src/Backend/main.py ingest` | Run full pipeline: graphs → flows → embeddings → counterfactuals |
-| `python src/Backend/main.py investigate [query]` | Run the LLM agent investigation |
-| `python src/Backend/main.py serve` | Start the REST + WebSocket API server |
-| `python src/Backend/main.py convert` | Convert raw CSV data to NDJSON |
+| `health` | Check ES connectivity and index document counts |
+| `ingest` | Run full batch pipeline: graphs -> flows -> embeddings -> counterfactuals |
+| `investigate [query]` | Run the interactive LLM agent investigation |
+| `serve --port 8000` | Start the REST + WebSocket API server |
+| `convert` | Convert raw CSV data to NDJSON |
+| `train --packets ... --labels ...` | Train the Temporal GNN and save checkpoint to `models/temporal_gnn.pt` |
+| `simulate --rate 200 --window-size 5` | Run real-time packet simulation through the full pipeline |
+
+The real-time engine also has its own standalone CLI:
+
+```bash
+python -m src.Backend.process_pipeline --ndjson data/packets_0000.json --rate 500 --window-size 5.0 --debug
+```
 
 ---
 
