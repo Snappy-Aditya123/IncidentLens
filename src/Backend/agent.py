@@ -163,7 +163,10 @@ class IncidentAgent:
                 yield error_event(f"LLM API error: {e}")
                 return
 
-            choice = response.choices[0]
+            choice = response.choices[0] if response.choices else None
+            if choice is None:
+                yield error_event("LLM returned empty choices list")
+                return
             msg = choice.message
 
             # Emit any text reasoning

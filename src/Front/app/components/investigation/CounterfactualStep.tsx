@@ -1,12 +1,10 @@
 import { useMemo } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card';
-import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
 import { Separator } from '../ui/separator';
 import { Progress } from '../ui/progress';
-import { Brain, ArrowRight, CheckCircle2, AlertCircle, Home } from 'lucide-react';
+import { Brain, ArrowRight, CheckCircle2, AlertCircle } from 'lucide-react';
 import { CounterfactualExplanation } from '../../types';
-import { Link } from 'react-router';
 
 interface CounterfactualStepProps {
   data: CounterfactualExplanation;
@@ -193,16 +191,10 @@ export function CounterfactualStep({ data }: CounterfactualStepProps) {
         <CardContent className="py-6">
           <div className="text-center">
             <CheckCircle2 className="w-12 h-12 mx-auto mb-4 text-green-400" />
-            <h3 className="text-slate-100 mb-2">Investigation Complete</h3>
+            <h3 className="text-slate-100 mb-2">Explainability Analysis Complete</h3>
             <p className="text-sm text-slate-400 mb-4">
-              All analysis steps completed. Review the findings and implement recommended actions.
+              Counterfactual analysis finished. Continue to the AI Agent for deeper investigation.
             </p>
-            <Link to="/">
-              <Button className="bg-green-600 hover:bg-green-700">
-                <Home className="mr-2 w-4 h-4" />
-                Back to Dashboard
-              </Button>
-            </Link>
           </div>
         </CardContent>
       </Card>

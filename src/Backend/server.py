@@ -395,6 +395,8 @@ async def list_incidents(size: int = Query(50)):
     """
     try:
         data = await asyncio.to_thread(_cached_detect, "label", 0.5, size)
+        if isinstance(data, dict) and "error" in data:
+            return JSONResponse(status_code=502, content=data)
         incidents = [_flow_to_incident(f) for f in data.get("flows", [])]
         return {"count": len(incidents), "incidents": incidents}
     except Exception as e:
@@ -484,8 +486,10 @@ async def incident_logs(incident_id: str, size: int = Query(20)):
     try:
         def _build_logs():
             inc_data = wrappers.get_flow(incident_id)
+            if inc_data is None:
+                return None  # signal 404
             query_clauses: list[dict] = []
-            if inc_data and inc_data.get("src_ip"):
+            if inc_data.get("src_ip"):
                 query_clauses.append({"term": {"src_ip": inc_data["src_ip"]}})
             query = {"bool": {"must": query_clauses}} if query_clauses else {"match_all": {}}
             flows = wrappers.search_flows(query=query, size=size)
@@ -506,15 +510,13 @@ async def incident_logs(incident_id: str, size: int = Query(20)):
             return {
                 "totalHits": len(logs),
                 "logs": logs,
-                "query": {
-                    "bool": {
-                        "must": [{"term": {"label": 1}}],
-                        "filter": [{"range": {"@timestamp": {"gte": "now-1h"}}}],
-                    }
-                },
+                "query": query,
             }
 
-        return await asyncio.to_thread(_build_logs)
+        result = await asyncio.to_thread(_build_logs)
+        if result is None:
+            return JSONResponse(status_code=404, content={"error": f"Incident {incident_id} not found"})
+        return result
     except Exception as e:
         return JSONResponse(status_code=502, content={"error": str(e)})
 
@@ -697,8 +699,13 @@ async def ws_investigate(websocket: WebSocket):
     logger.info("WebSocket connected")
 
     try:
-        # Receive the investigation query
-        raw = await websocket.receive_text()
+        # Receive the investigation query (timeout prevents idle connection DoS)
+        try:
+            raw = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
+        except asyncio.TimeoutError:
+            await websocket.send_json({"type": "error", "content": "Timeout waiting for query"})
+            await websocket.send_json({"type": "done"})
+            return
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError:
@@ -784,8 +791,13 @@ async def ws_simulate(websocket: WebSocket):
     logger.info("Simulation WebSocket connected")
 
     try:
-        # --- Receive config ---
-        raw = await websocket.receive_text()
+        # --- Receive config (timeout prevents idle connection DoS) ---
+        try:
+            raw = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
+        except asyncio.TimeoutError:
+            await websocket.send_json({"type": "error", "content": "Timeout waiting for config"})
+            await websocket.send_json({"type": "done"})
+            return
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError:
@@ -798,9 +810,9 @@ async def ws_simulate(websocket: WebSocket):
 
         # Security: only allow files under data/
         import pathlib
-        base_data = pathlib.Path("data").resolve()
+        base_data = pathlib.Path(__file__).resolve().parent.parent.parent / "data"
         requested = pathlib.Path(data_file).resolve()
-        if not str(requested).startswith(str(base_data)):
+        if not requested.is_relative_to(base_data):
             await websocket.send_json({
                 "type": "error",
                 "content": "data_file must be under the data/ directory",

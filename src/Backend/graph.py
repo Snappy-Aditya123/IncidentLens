@@ -214,15 +214,18 @@ class network:
 		return float(eigenvalues[1])
 
 	def spectral_radius(self) -> float:
-		"""Return the largest eigenvalue of the adjacency matrix.
+		"""Return the largest eigenvalue (by magnitude) of the adjacency matrix.
 
 		The spectral radius bounds the maximum influence any node can
 		have — useful for detecting amplification attacks (SSDP floods).
+
+		Uses ``eigvals`` (not ``eigvalsh``) because the adjacency matrix
+		of a directed graph is generally asymmetric.
 		"""
 		adj = self.build_sparse_adjacency()
 		adj_dense = adj.to_dense().float()
-		eigenvalues = torch.linalg.eigvalsh(adj_dense)
-		return float(eigenvalues[-1])
+		eigenvalues = torch.linalg.eigvals(adj_dense)
+		return float(eigenvalues.abs().max())
 
 	@classmethod
 	def from_edge_list(

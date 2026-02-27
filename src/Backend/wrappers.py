@@ -1337,7 +1337,14 @@ def generate_embeddings(
             for idx, g in enumerate(graphs):
                 if is_temporal and model._all_graphs is not None:
                     # Use the preprocessed graph at the same position
-                    preprocessed_g = model._all_graphs[min(idx, len(model._all_graphs) - 1)]
+                    if idx >= len(model._all_graphs):
+                        raise IndexError(
+                            f"Graph index {idx} out of range for "
+                            f"model._all_graphs (len={len(model._all_graphs)}). "
+                            f"Ensure set_graph_sequence() was called with "
+                            f"the same graphs list."
+                        )
+                    preprocessed_g = model._all_graphs[idx]
                     edge_emb = model.encode(preprocessed_g)
                 else:
                     edge_emb = model.encode(g)  # (E, D) tensor, L2-normalised
@@ -1902,7 +1909,10 @@ def build_and_index_counterfactual(
         return None
 
     best = neighbours[0]
-    nn_flow_id = best["flow_id"]
+    nn_flow_id = best.get("flow_id")
+    if not nn_flow_id:
+        logger.warning("Nearest normal neighbour has no flow_id for %s", anomalous_flow_id)
+        return None
 
     # 3. retrieve the normal flow doc
     try:

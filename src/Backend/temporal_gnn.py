@@ -1122,7 +1122,7 @@ def train_temporal_gnn(
     n_train = max(1, int(n_total * train_ratio))
     n_val = max(1, int(n_total * val_ratio))
     # Ensure at least 1 sequence in each split when possible
-    if n_train + n_val >= n_total:
+    if n_train + n_val > n_total:
         # Tiny dataset — use all for training, no val/test
         n_train = n_total
         n_val = 0

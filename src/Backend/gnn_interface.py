@@ -243,17 +243,16 @@ def create_dataloaders(
         info = {"train": n, "val": 0, "test": 0, "total": n}
         return loader, None, None, info
 
-    # Deterministic shuffle
-    gen = torch.Generator().manual_seed(seed)
-    perm = torch.randperm(n, generator=gen).tolist()
-
+    # Chronological split (no shuffle) to prevent temporal data leakage.
+    # Temporal graphs must stay in order: first train_ratio for training,
+    # next val_ratio for validation, remainder for test.
     n_train = max(1, int(n * train_ratio))
     n_val = max(1, int(n * val_ratio))
     n_test = n - n_train - n_val
 
-    train_graphs = [graphs[i] for i in perm[:n_train]]
-    val_graphs = [graphs[i] for i in perm[n_train:n_train + n_val]]
-    test_graphs = [graphs[i] for i in perm[n_train + n_val:]]
+    train_graphs = graphs[:n_train]
+    val_graphs = graphs[n_train:n_train + n_val]
+    test_graphs = graphs[n_train + n_val:]
 
     train_loader = DataLoader(train_graphs, batch_size=batch_size, shuffle=shuffle)
     val_loader = DataLoader(val_graphs, batch_size=batch_size, shuffle=False)

@@ -78,8 +78,10 @@ export function Dashboard() {
                   <h1 className="text-slate-100">IncidentLens</h1>
                   {health ? (
                     <span className="flex items-center gap-1 text-xs" title={`Server: ${health.server}, ES: ${health.elasticsearch}`}>
-                      <Heart className="w-3 h-3 text-green-400 fill-green-400" />
-                      <span className="text-green-400">Online</span>
+                      <Heart className={`w-3 h-3 ${health.elasticsearch === 'green' || health.elasticsearch === 'yellow' ? 'text-green-400 fill-green-400' : 'text-red-400 fill-red-400'}`} />
+                      <span className={health.elasticsearch === 'green' || health.elasticsearch === 'yellow' ? 'text-green-400' : 'text-red-400'}>
+                        {health.error ? 'Degraded' : 'Online'}
+                      </span>
                     </span>
                   ) : (
                     <span className="flex items-center gap-1 text-xs" title="Backend unreachable">
