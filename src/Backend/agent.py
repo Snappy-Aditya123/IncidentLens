@@ -142,16 +142,37 @@ class IncidentAgent:
             max_workers=2, thread_name_prefix="agent-tool",
         )
 
-    def investigate(self, user_query: str) -> Iterator[dict]:
+    def investigate(self, user_query: str, report_context: str | None = None) -> Iterator[dict]:
         """Run a full multi-step investigation, yielding events.
 
         This is a synchronous generator so it works easily with both
         sync callers and ``asyncio.to_thread`` for async WebSocket.
+
+        If *report_context* is provided it is injected as a system message
+        immediately after the base system prompt.  This gives the LLM full
+        visibility of the dashboard / summary report data so it can answer
+        any follow-up questions about the report.
         """
         messages: list[dict] = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_query},
         ]
+
+        if report_context:
+            messages.append({
+                "role": "system",
+                "content": (
+                    "The user is viewing the IncidentLens dashboard report. "
+                    "Below is the FULL data from their current investigation "
+                    "(incident details, Elasticsearch logs, network graph, "
+                    "counterfactual analysis, severity breakdown, and feature "
+                    "statistics).  Use this data to answer the user's questions "
+                    "accurately.  You may still call tools for additional data "
+                    "if needed, but prefer explaining the report data first.\n\n"
+                    + report_context
+                ),
+            })
+
+        messages.append({"role": "user", "content": user_query})
 
         yield status_event("Starting investigation...")
 

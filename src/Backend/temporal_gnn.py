@@ -1031,8 +1031,8 @@ def train_temporal_gnn(
     info: dict,
     *,
     device: str = "cpu",
-    epochs: int = 30,
-    lr: float = 1e-3,
+    epochs: int = 50,
+    lr: float = 5e-4,
     hidden_dim: int = 64,
     dropout: float = 0.2,
     checkpoint_path: str | Path | None = None,
@@ -1042,6 +1042,8 @@ def train_temporal_gnn(
     use_ode: bool = False,
     train_ratio: float = 0.70,
     val_ratio: float = 0.15,
+    patience: int = 15,
+    min_epochs: int = 20,
 ) -> TemporalGNNEncoder:
     """Train an EvolvingGNN (or ODE variant) on temporal sequences.
 
@@ -1075,6 +1077,8 @@ def train_temporal_gnn(
     use_ode : if True, use Neural ODE weight evolution (requires torchdiffeq)
     train_ratio : fraction of sequences for training (default 0.70)
     val_ratio : fraction of sequences for validation (default 0.15)
+    patience : epochs without val improvement before early stopping (default 15)
+    min_epochs : minimum epochs to train before early stopping can activate (default 20)
 
     Returns
     -------
@@ -1180,13 +1184,13 @@ def train_temporal_gnn(
     print(f"  Hidden dim:     {hidden_dim}")
     print(f"  Pos / Neg:      {pos} / {neg}  (train set)")
     print(f"  Pos weight:     {pos_weight.item():.4f}")
+    print(f"  Patience:       {patience}  (early-stop disabled before epoch {min_epochs})")
     print(f"  Device:         {device}")
     print(f"{'='*60}\n")
 
     best_val_f1 = 0.0
     best_state = None
     patience_counter = 0
-    patience = 10  # early-stopping patience
 
     # Pre-compute a fixed random permutation seed per epoch for shuffling
     rng = np.random.default_rng(42)
@@ -1289,8 +1293,8 @@ def train_temporal_gnn(
                 msg += f" | Val F1 {val_f1:.4f}"
             print(msg)
 
-        # Early stopping
-        if val_seqs and patience_counter >= patience:
+        # Early stopping (only after min_epochs; disabled when patience <= 0)
+        if patience > 0 and val_seqs and patience_counter >= patience and epoch >= min_epochs:
             print(f"  Early stopping at epoch {epoch} (no val improvement for {patience} epochs)")
             break
 

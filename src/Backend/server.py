@@ -143,11 +143,6 @@ def _cached_detect(method: str = "label", threshold: float = 0.5, size: int = 50
 # Pydantic models
 # ──────────────────────────────────────────────
 
-class InvestigateRequest(BaseModel):
-    query: str = ""
-    """User's investigation question.  Empty = auto-detect anomalies."""
-
-
 class DetectRequest(BaseModel):
     method: str = "label"
     threshold: float = 0.5
@@ -201,6 +196,12 @@ async def health():
         )
 
 
+class InvestigateRequest(BaseModel):
+    query: str = ""
+    context: str = ""
+    """Optional report context injected into the agent's system prompt."""
+
+
 @app.post("/api/investigate")
 async def investigate(req: InvestigateRequest):
     """Run a full investigation (non-streaming, returns all events)."""
@@ -213,7 +214,7 @@ async def investigate(req: InvestigateRequest):
 
     events: list[dict] = []
     def _run():
-        for event in agent.investigate(query):
+        for event in agent.investigate(query, report_context=req.context or None):
             events.append(event)
 
     await asyncio.to_thread(_run)
@@ -521,6 +522,145 @@ async def incident_logs(incident_id: str, size: int = Query(20)):
         return JSONResponse(status_code=502, content={"error": str(e)})
 
 
+@app.get("/api/report-context/{incident_id}")
+async def report_context(incident_id: str):
+    """Gather all available data for an incident into a single context blob.
+
+    This is used by the AI Agent to have full visibility of the dashboard /
+    investigation report so it can answer follow-up questions about it.
+    """
+    try:
+        def _gather():
+            sections: list[str] = []
+
+            # 1. Incident / flow details
+            flow = wrappers.get_flow(incident_id)
+            if flow:
+                flow["_id"] = incident_id
+                inc = _flow_to_incident(flow)
+                sections.append(
+                    f"## Incident Details\n"
+                    f"- **ID**: {inc['id']}\n"
+                    f"- **Title**: {inc['title']}\n"
+                    f"- **Severity**: {inc['severity']}\n"
+                    f"- **Status**: {inc['status']}\n"
+                    f"- **Anomaly Score**: {inc['anomalyScore']}\n"
+                    f"- **Description**: {inc['description']}\n"
+                    f"- **Affected Systems**: {', '.join(inc['affectedSystems'])}\n"
+                    f"- **Timestamp**: {inc['timestamp']}\n"
+                )
+                # Raw flow fields
+                raw_fields = {k: v for k, v in flow.items() if k != "_id"}
+                sections.append(
+                    f"### Raw Flow Data\n```json\n{json.dumps(raw_fields, indent=2, default=str)}\n```"
+                )
+
+            # 2. Feature stats
+            try:
+                stats = wrappers.feature_stats_by_label()
+                if stats:
+                    sections.append(
+                        f"## Feature Statistics (by label)\n```json\n{json.dumps(stats, indent=2, default=str)}\n```"
+                    )
+            except Exception as exc:
+                logger.debug("Report-context: failed to fetch feature stats: %s", exc, exc_info=True)
+
+            # 3. Severity breakdown
+            try:
+                sev = wrappers.aggregate_severity_breakdown()
+                if sev:
+                    severity_levels = sev.get("severity", {})
+                    volume_cats = sev.get("volume", {})
+                    total = sum(severity_levels.values()) if severity_levels else 0
+                    sections.append(
+                        f"## Severity Breakdown\n"
+                        f"- **Total Flows**: {total}\n"
+                        f"- **Severity Levels**: {json.dumps(severity_levels)}\n"
+                        f"- **Traffic Volume Categories**: {json.dumps(volume_cats)}\n"
+                    )
+            except Exception as exc:
+                logger.debug("Report-context: failed to fetch severity breakdown: %s", exc, exc_info=True)
+
+            # 4. ES logs for this incident
+            try:
+                if flow:
+                    query_clauses: list[dict] = []
+                    if flow.get("src_ip"):
+                        query_clauses.append({"term": {"src_ip": flow["src_ip"]}})
+                    query = {"bool": {"must": query_clauses}} if query_clauses else {"match_all": {}}
+                    log_flows = wrappers.search_flows(query=query, size=20)
+                    if log_flows:
+                        log_lines = []
+                        for f in log_flows[:20]:
+                            label_str = "ANOMALOUS" if f.get("label") == 1 else "NORMAL"
+                            log_lines.append(
+                                f"  {f.get('src_ip', '?')} → {f.get('dst_ip', '?')}: "
+                                f"{f.get('packet_count', 0)} pkts, {f.get('total_bytes', 0)} bytes [{label_str}]"
+                            )
+                        sections.append(
+                            f"## Elasticsearch Logs (related flows)\n" + "\n".join(log_lines)
+                        )
+            except Exception as exc:
+                logger.debug("Report-context: failed to fetch ES logs: %s", exc, exc_info=True)
+
+            # 5. Network graph summary
+            try:
+                data = _cached_detect("label", 0.5, 30)
+                all_flows = data.get("flows", [])
+                if flow:
+                    scope_ips = {flow.get("src_ip"), flow.get("dst_ip")} - {None}
+                    related = [f for f in all_flows if f.get("src_ip") in scope_ips or f.get("dst_ip") in scope_ips]
+                else:
+                    related = all_flows
+                if related:
+                    unique_ips = set()
+                    for f in related:
+                        if f.get("src_ip"): unique_ips.add(f["src_ip"])
+                        if f.get("dst_ip"): unique_ips.add(f["dst_ip"])
+                    sections.append(
+                        f"## Network Graph Summary\n"
+                        f"- **Nodes (unique IPs)**: {len(unique_ips)}\n"
+                        f"- **Edges (flows)**: {len(related)}\n"
+                        f"- **IPs**: {', '.join(sorted(unique_ips)[:20])}\n"
+                    )
+            except Exception as exc:
+                logger.debug("Report-context: failed to build network graph summary: %s", exc, exc_info=True)
+
+            # 6. Counterfactual (read-only: look up existing CF first)
+            try:
+                es = wrappers.get_client()
+                # Search for an already-indexed counterfactual for this flow
+                cf_query = {"query": {"term": {"flow_id": incident_id}}, "size": 1}
+                cf_resp = es.search(index=wrappers.COUNTERFACTUALS_INDEX, body=cf_query)
+                cf_hits = cf_resp["hits"]["hits"]
+                if cf_hits:
+                    cf = cf_hits[0]["_source"]
+                else:
+                    # No existing CF — build and index one (first time only)
+                    emb_body = {"query": {"term": {"flow_id": incident_id}}, "size": 1}
+                    emb_resp = es.search(index=wrappers.EMBEDDINGS_INDEX, body=emb_body)
+                    emb_hits = emb_resp["hits"]["hits"]
+                    cf = None
+                    if emb_hits:
+                        emb = emb_hits[0]["_source"]["embedding"]
+                        cf = wrappers.build_and_index_counterfactual(
+                            anomalous_flow_id=incident_id, query_embedding=emb, es=es,
+                        )
+                if cf:
+                    sections.append(
+                        f"## Counterfactual Analysis\n```json\n{json.dumps(cf, indent=2, default=str)}\n```"
+                    )
+            except Exception as exc:
+                logger.debug("Report-context: failed to fetch counterfactual: %s", exc, exc_info=True)
+
+            return "\n\n".join(sections) if sections else "No data available for this incident."
+
+        context_text = await asyncio.to_thread(_gather)
+        return {"incident_id": incident_id, "context": context_text}
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
+
+
 # ──────────────────────────────────────────────
 # ES-NATIVE ENDPOINTS (runtime fields, aggregations, ML, PIT)
 # These showcase Elasticsearch capabilities beyond basic CRUD.
@@ -734,6 +874,7 @@ async def ws_investigate(websocket: WebSocket):
             payload = {"query": raw}
 
         query = payload.get("query", "").strip()
+        report_context = payload.get("context", "").strip() or None
         if not query:
             query = (
                 "Detect any anomalous network flows, investigate the top "
@@ -751,7 +892,7 @@ async def ws_investigate(websocket: WebSocket):
 
             def _producer():
                 try:
-                    for event in agent.investigate(query):
+                    for event in agent.investigate(query, report_context=report_context):
                         loop.call_soon_threadsafe(queue.put_nowait, event)
                 except Exception as e:
                     loop.call_soon_threadsafe(

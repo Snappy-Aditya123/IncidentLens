@@ -128,6 +128,17 @@ export async function investigate(query: string): Promise<{ events: Investigatio
 
 /* ─── incident endpoints (direct wrappers) ─── */
 
+/**
+ * Fetch the full report context for an incident — gathers all available data
+ * (flow details, severity, stats, logs, graph, counterfactual) into a single
+ * text blob that can be injected into the LLM agent's system prompt.
+ */
+export async function getReportContext(incidentId: string): Promise<{ incident_id: string; context: string }> {
+  return fetchJson<{ incident_id: string; context: string }>(
+    `/api/report-context/${encodeURIComponent(incidentId)}`,
+  );
+}
+
 export async function listIncidents(size = 50): Promise<{ count: number; incidents: Incident[] }> {
   return fetchJson<{ count: number; incidents: Incident[] }>(`/api/incidents?size=${size}`);
 }
@@ -262,6 +273,7 @@ export async function getMLInfluencers(params?: {
 export async function* investigateStream(
   query: string,
   signal?: AbortSignal,
+  context?: string,
 ): AsyncGenerator<InvestigationEvent> {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${proto}//${window.location.host}/ws/investigate`);
@@ -308,7 +320,7 @@ export async function* investigateStream(
   // Wait for open, then send the query
   await new Promise<void>((res, rej) => {
     ws.onopen = () => {
-      ws.send(JSON.stringify({ query }));
+      ws.send(JSON.stringify({ query, context: context ?? "" }));
       // Restore runtime error handler after successful connection
       ws.onerror = () => {
         error = new Error("WebSocket error");

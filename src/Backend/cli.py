@@ -221,6 +221,8 @@ def cmd_train(args):
         checkpoint_path=checkpoint,
         norm_stats=info.get("norm_stats"),
         seq_len=args.seq_len,
+        patience=getattr(args, "patience", 15),
+        min_epochs=getattr(args, "min_epochs", 20),
     )
     print(f"\nModel saved to: {checkpoint}")
     print("You can now run: python main.py ingest  (will auto-load this checkpoint)")
@@ -284,6 +286,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--dropout", type=float, default=0.2)
     p_train.add_argument("--batch-size", type=int, default=8, help="Sequences per gradient update")
     p_train.add_argument("--ode", action="store_true", help="Use Neural ODE weight evolution (requires torchdiffeq)")
+    p_train.add_argument("--patience", type=int, default=15, help="Early-stopping patience (epochs without val improvement)")
+    p_train.add_argument("--min-epochs", type=int, default=20, help="Minimum epochs before early stopping can activate")
     p_train.add_argument("--checkpoint", default=None, help="Where to save model (default: models/temporal_gnn.pt)")
 
     # --- simulate ---

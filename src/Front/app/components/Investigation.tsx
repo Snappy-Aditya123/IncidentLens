@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router';
 import { useIncident, useElasticsearchData, useNetworkGraph, useCounterfactual, useInvestigationStream } from '../hooks/useApi';
+import * as api from '../services/api';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
@@ -32,12 +33,30 @@ export function Investigation() {
   const { incidentId } = useParams();
   const [currentStep, setCurrentStep] = useState<InvestigationStep>('overview');
   const [agentQuery, setAgentQuery] = useState('');
+  const [reportContext, setReportContext] = useState<string>('');
   
   const { data: incident, loading: incidentLoading } = useIncident(incidentId);
   const { data: elasticsearchData, loading: esLoading } = useElasticsearchData(incidentId);
   const { data: networkGraph, loading: graphLoading } = useNetworkGraph(incidentId);
   const { data: counterfactual, loading: cfLoading } = useCounterfactual(incidentId);
   const { events: agentEvents, running: agentRunning, error: agentError, start: startAgent, stop: stopAgent } = useInvestigationStream();
+
+  // Pre-fetch the full report context for this incident so the AI agent
+  // can answer any questions about the dashboard / summary report.
+  // Re-fetches when incidentId changes; uses AbortController for cleanup.
+  useEffect(() => {
+    if (!incidentId) return;
+    setReportContext('');
+    const controller = new AbortController();
+    api.getReportContext(incidentId)
+      .then((res) => {
+        if (!controller.signal.aborted) {
+          setReportContext(res.context ?? '');
+        }
+      })
+      .catch(() => {/* best-effort — agent still works without it */});
+    return () => { controller.abort(); };
+  }, [incidentId]);
 
   if (incidentLoading) {
     return (
@@ -304,19 +323,20 @@ export function Investigation() {
                   AI Agent Investigation
                 </CardTitle>
                 <CardDescription className="text-slate-400">
-                  Ask the LLM agent to investigate this incident using tools — Elasticsearch queries, GNN analysis, and counterfactual reasoning.
+                  Ask the AI agent anything about this incident — it has the full summary report loaded.
+                  It can explain severity scores, anomaly patterns, counterfactual results, and recommend actions.
                 </CardDescription>
               </CardHeader>
               <CardContent>
                 {/* Query input */}
                 <div className="flex gap-2 mb-6">
                   <Input
-                    placeholder={`Investigate incident ${incidentId ?? ''}...`}
+                    placeholder={`Ask about this incident — e.g. "What does the anomaly score mean?" or "Explain the severity"...`}
                     value={agentQuery}
                     onChange={(e) => setAgentQuery(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && !agentRunning && agentQuery.trim()) {
-                        startAgent(agentQuery.trim() || `Investigate incident ${incidentId}`);
+                        startAgent(agentQuery.trim() || `Investigate incident ${incidentId}`, reportContext || undefined);
                       }
                     }}
                     className="bg-slate-800 border-slate-700 text-slate-100 placeholder:text-slate-500"
@@ -329,7 +349,7 @@ export function Investigation() {
                     </Button>
                   ) : (
                     <Button
-                      onClick={() => startAgent(agentQuery.trim() || `Investigate incident ${incidentId}`)}
+                      onClick={() => startAgent(agentQuery.trim() || `Investigate incident ${incidentId}`, reportContext || undefined)}
                       disabled={!agentQuery.trim() && !incidentId}
                       className="bg-purple-600 hover:bg-purple-700 px-4"
                     >
@@ -397,10 +417,11 @@ export function Investigation() {
                   <div className="text-center py-8">
                     <Brain className="w-12 h-12 mx-auto mb-4 text-slate-600" />
                     <p className="text-slate-400 text-sm">
-                      Enter a question to start the AI agent investigation.
+                      Ask the AI agent anything about this investigation report.
                     </p>
                     <p className="text-slate-500 text-xs mt-1">
-                      The agent will use Elasticsearch, GNN analysis, and counterfactual tools automatically.
+                      Try: "What does this anomaly score mean?", "Explain the severity breakdown",
+                      "Why is this traffic suspicious?", or "What actions should I take?"
                     </p>
                   </div>
                 )}

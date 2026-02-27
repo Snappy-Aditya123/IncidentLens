@@ -232,7 +232,7 @@ export function useInvestigationStream() {
     };
   }, []);
 
-  const start = useCallback(async (query: string) => {
+  const start = useCallback(async (query: string, context?: string) => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -242,7 +242,7 @@ export function useInvestigationStream() {
     setError(null);
 
     try {
-      for await (const event of api.investigateStream(query, controller.signal)) {
+      for await (const event of api.investigateStream(query, controller.signal, context)) {
         if (controller.signal.aborted) break;
         setEvents((prev) => [...prev, event]);
       }
