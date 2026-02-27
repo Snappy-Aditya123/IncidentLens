@@ -2171,3 +2171,37 @@ def _self_test() -> None:
     delete_all_indices(es)
     print("[OK] Test indices cleaned up")
     print("\n[PASS] All self-tests passed!")
+def index_flows_bulk(
+    flows: list[dict],
+    es: Elasticsearch | None = None,
+    batch_size: int = 500,
+) -> int:
+    """
+    Bulk index simple flow dictionaries into FLOWS_INDEX.
+    Used by real-time simulation (non-graph ingestion).
+    """
+    es = es or get_client()
+
+    if not flows:
+        return 0
+
+    actions = [
+        {
+            "_index": FLOWS_INDEX,
+            "_id": flow["flow_id"],
+            "_source": flow,
+        }
+        for flow in flows
+    ]
+
+    success, errors = helpers.bulk(
+        es,
+        actions,
+        chunk_size=batch_size,
+        raise_on_error=False,
+    )
+
+    if errors:
+        logger.warning("Flow bulk indexing had %d errors", len(errors))
+
+    return success

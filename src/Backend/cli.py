@@ -309,27 +309,53 @@ def build_parser() -> argparse.ArgumentParser:
         default=5.0,
         help="Window duration in seconds"
     )
+    p_sim.add_argument(
+    "--mode",
+    choices=["rate", "realtime"],
+    default="rate",
+    help="Replay mode"
+)
+
+    p_sim.add_argument(
+        "--time-scale",
+        type=float,
+        default=1.0,
+        help="Scale realtime replay (0.1 = 10x faster)"
+    )
 
     return parser
+async def pipeline(window_id, window_start, flows):
+    from src.Backend.wrappers import index_flows_bulk
+
+    print(f"[PIPE] Processing window {window_id}")
+
+    if flows:
+        index_flows_bulk(flows)
+
 
 def cmd_simulate(args):
-    """Simulate real-time packet streaming and windowed aggregation."""
     import asyncio
-    from simulation import StreamSimulator
     from src.Backend.ingest_pipeline import load_ndjson_files
+    from src.Backend.simulation import StreamSimulator
 
-    print(f"[Simulation] rate={args.rate} packets/sec | window={args.window_size}s")
+    print(
+        f"[Simulation] mode={args.mode} | "
+        f"rate={args.rate}pps | "
+        f"window={args.window_size}s | "
+        f"time_scale={args.time_scale}"
+    )
 
-    # Load packets from NDJSON
+    # Load packets
     df = load_ndjson_files(args.data_dir, max_rows=args.max_rows)
-
-    # Convert dataframe to packet dict stream
     packets = df.to_dict(orient="records")
 
     simulator = StreamSimulator(
         packets=packets,
         rate=args.rate,
         window_size=args.window_size,
+        mode=args.mode,
+        time_scale=args.time_scale,
+        window_callback=pipeline,
     )
 
     asyncio.run(simulator.run())
@@ -342,25 +368,39 @@ def main():
     logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
 
     commands = {
-    "health": cmd_health,
-    "ingest": cmd_ingest,
-    "investigate": cmd_investigate,
-    "serve": cmd_serve,
-    "convert": cmd_convert,
-    "train": cmd_train,
-    "simulate": cmd_simulate,   # ← add this
-}
+        "health": cmd_health,
+        "ingest": cmd_ingest,
+        "investigate": cmd_investigate,
+        "serve": cmd_serve,
+        "convert": cmd_convert,
+        "train": cmd_train,
+        "simulate": cmd_simulate,
+    }
 
     if args.command is None:
         parser.print_help()
-        print("\nQuick start:")
-        print("  1. docker compose up -d              # Start ES + Kibana")
-        print("  2. python main.py health              # Verify ES is up")
-        print("  3. python main.py convert              # CSV -> NDJSON (if needed)")
-        print("  4. python main.py train --packets ... --labels ...  # Train GNN (once)")
-        print("  5. python main.py ingest               # Index data + use pretrained GNN")
-        print("  6. python main.py investigate           # Run AI agent")
         sys.exit(0)
+
+    cmd_fn = commands.get(args.command)
+    if cmd_fn:
+        cmd_fn(args)
+    else:
+        parser.print_help()
+        sys.exit(1)
+
+
+
+    if args.command is None:
+        print("[INFO] No command provided — starting simulation mode")
+
+        # Set defaults for simulation
+        args.command = "simulate"
+        args.mode = "realtime"
+        args.time_scale = 0.2
+        args.rate = 200.0
+        args.window_size = 5.0
+        args.max_rows = None
+        args.data_dir = str(Path(__file__).resolve().parent.parent.parent / "data")
 
     cmd_fn = commands.get(args.command)
     if cmd_fn:
