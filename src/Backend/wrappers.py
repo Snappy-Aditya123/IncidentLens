@@ -1978,6 +1978,45 @@ def get_flow(flow_id: str, es: Elasticsearch | None = None) -> dict | None:
         return None
 
 
+def get_flow_by_id(flow_id: str, es: Elasticsearch | None = None) -> dict | None:
+    """Alias for get_flow — used by LLMReasoner tools."""
+    return get_flow(flow_id, es=es)
+
+
+def get_graph_summary(window_id: int, es: Elasticsearch | None = None) -> dict | None:
+    """Fetch the graph summary document for a specific window_id."""
+    es = es or get_client()
+    try:
+        resp = es.search(
+            index=GRAPH_SUMMARIES_INDEX,
+            body={
+                "size": 1,
+                "query": {"term": {"window_id": window_id}},
+            },
+        )
+        hits = resp["hits"]["hits"]
+        return hits[0]["_source"] if hits else None
+    except Exception:
+        return None
+
+
+def get_recent_graph_summaries(n: int = 5, es: Elasticsearch | None = None) -> list[dict]:
+    """Fetch the N most recent graph summaries, ordered by timestamp descending."""
+    es = es or get_client()
+    try:
+        resp = es.search(
+            index=GRAPH_SUMMARIES_INDEX,
+            body={
+                "size": n,
+                "sort": [{"timestamp": {"order": "desc"}}],
+                "query": {"match_all": {}},
+            },
+        )
+        return [hit["_source"] for hit in resp["hits"]["hits"]]
+    except Exception:
+        return []
+
+
 def get_counterfactual(cf_id: str, es: Elasticsearch | None = None) -> dict | None:
     """Fetch a counterfactual document by ID."""
     es = es or get_client()

@@ -25,6 +25,7 @@ services:
     restart: unless-stopped
     environment:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - ELASTICSEARCH_PASSWORD=changeme
     ports:
       - "5601:5601"
     depends_on:
@@ -46,6 +47,9 @@ services:
       - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
       - INCIDENTLENS_CORS_ORIGINS=http://localhost,http://localhost:80,http://frontend
       - PORT=8000
+      - ALERT_EMAIL_SENDER=${ALERT_EMAIL_SENDER:-}
+      - ALERT_EMAIL_PASSWORD=${ALERT_EMAIL_PASSWORD:-}
+      - ALERT_EMAIL_RECIPIENT=${ALERT_EMAIL_RECIPIENT:-}
     ports:
       - "8000:8000"
     volumes:
