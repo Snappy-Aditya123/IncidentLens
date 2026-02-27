@@ -1045,12 +1045,13 @@ def train_temporal_gnn(
 ) -> TemporalGNNEncoder:
     """Train an EvolvingGNN (or ODE variant) on temporal sequences.
 
-    **Time-based train / val / test split:**
+    **Stratified temporal train / val / test split:**
 
-    Sequences are assumed to be in chronological order.  The first
-    *train_ratio* fraction is used for gradient updates, the next
-    *val_ratio* for early-stopping (best val F1), and the remainder
-    for a held-out test report.  This prevents temporal leakage.
+    Sequences are split using a stratified approach: sequences that contain
+    attack edges (class 1) and normal-only sequences are split *separately*
+    by the given ratios, then merged back.  Within each group, temporal
+    order is preserved.  This ensures that attack samples appear in all
+    splits — critical when attacks are clustered at the end of a dataset.
 
     **Optimised** (vs. previous version):
 
@@ -1117,20 +1118,47 @@ def train_temporal_gnn(
         [g.to(device) for g in seq] for seq in sequences
     ]
 
-    # ── Time-based train / val / test split ──
+    # ── Stratified train / val / test split ──
+    # Separate sequences by whether they contain attack edges (class 1).
+    # Within each group, maintain temporal order and split proportionally.
+    # This prevents the common failure mode where all attacks are at the
+    # end of the dataset and end up entirely in the test set.
     n_total = len(sequences_dev)
-    n_train = max(1, int(n_total * train_ratio))
-    n_val = max(1, int(n_total * val_ratio))
-    # Ensure at least 1 sequence in each split when possible
-    if n_train + n_val > n_total:
-        # Tiny dataset — use all for training, no val/test
-        n_train = n_total
-        n_val = 0
-    n_test = n_total - n_train - n_val
 
-    train_seqs = sequences_dev[:n_train]
-    val_seqs = sequences_dev[n_train:n_train + n_val]
-    test_seqs = sequences_dev[n_train + n_val:]
+    attack_indices: list[int] = []
+    normal_indices: list[int] = []
+    for idx, seq in enumerate(sequences_dev):
+        if seq[-1].y.sum().item() > 0:  # any positive label in last snapshot
+            attack_indices.append(idx)
+        else:
+            normal_indices.append(idx)
+
+    def _temporal_split(indices: list[int]) -> tuple[list[int], list[int], list[int]]:
+        """Split a temporally-ordered index list into train / val / test."""
+        n = len(indices)
+        if n == 0:
+            return [], [], []
+        nt = max(1, int(n * train_ratio))
+        nv = max(1, int(n * val_ratio))
+        if nt + nv > n:
+            return indices[:], [], []
+        return indices[:nt], indices[nt:nt + nv], indices[nt + nv:]
+
+    atk_tr, atk_va, atk_te = _temporal_split(attack_indices)
+    nrm_tr, nrm_va, nrm_te = _temporal_split(normal_indices)
+
+    # Merge and sort by original index (preserves global temporal order)
+    train_idx = sorted(nrm_tr + atk_tr)
+    val_idx = sorted(nrm_va + atk_va)
+    test_idx = sorted(nrm_te + atk_te)
+
+    train_seqs = [sequences_dev[i] for i in train_idx]
+    val_seqs = [sequences_dev[i] for i in val_idx]
+    test_seqs = [sequences_dev[i] for i in test_idx]
+
+    n_train = len(train_seqs)
+    n_val = len(val_seqs)
+    n_test = len(test_seqs)
 
     # Compute class balance for weighted loss (train set only)
     all_labels = torch.cat([seq[-1].y for seq in train_seqs])
@@ -1144,7 +1172,7 @@ def train_temporal_gnn(
     print(f"\n{'='*60}")
     print(f"TEMPORAL GNN TRAINING ({variant_label})")
     print(f"{'='*60}")
-    print(f"  Total seqs:     {n_total}")
+    print(f"  Total seqs:     {n_total}  (attack: {len(attack_indices)}, normal: {len(normal_indices)})")
     print(f"  Train / Val / Test: {n_train} / {n_val} / {n_test}")
     print(f"  Batch size:     {batch_size}")
     print(f"  Node feat dim:  {node_feat_dim}")
