@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import { useParams, Link } from 'react-router';
-import { useIncident, useElasticsearchData, useNetworkGraph, useCounterfactual } from '../hooks/useApi';
+import { useIncident, useElasticsearchData, useNetworkGraph, useCounterfactual, useInvestigationStream } from '../hooks/useApi';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import { Progress } from './ui/progress';
 import { Separator } from './ui/separator';
+import { Input } from './ui/input';
 import { 
   ArrowLeft, 
   Database, 
@@ -15,23 +16,28 @@ import {
   CheckCircle2,
   Clock,
   AlertCircle,
-  Loader2
+  Loader2,
+  MessageSquare,
+  Send,
+  StopCircle
 } from 'lucide-react';
 import { ElasticsearchStep } from './investigation/ElasticsearchStep';
 import { GNNStep } from './investigation/GNNStep';
 import { CounterfactualStep } from './investigation/CounterfactualStep';
 import { format } from 'date-fns';
 
-type InvestigationStep = 'overview' | 'elasticsearch' | 'gnn' | 'counterfactual';
+type InvestigationStep = 'overview' | 'elasticsearch' | 'gnn' | 'counterfactual' | 'agent';
 
 export function Investigation() {
   const { incidentId } = useParams();
   const [currentStep, setCurrentStep] = useState<InvestigationStep>('overview');
+  const [agentQuery, setAgentQuery] = useState('');
   
   const { data: incident, loading: incidentLoading } = useIncident(incidentId);
   const { data: elasticsearchData, loading: esLoading } = useElasticsearchData(incidentId);
   const { data: networkGraph, loading: graphLoading } = useNetworkGraph(incidentId);
   const { data: counterfactual, loading: cfLoading } = useCounterfactual(incidentId);
+  const { events: agentEvents, running: agentRunning, error: agentError, start: startAgent, stop: stopAgent } = useInvestigationStream();
 
   if (incidentLoading) {
     return (
@@ -65,14 +71,15 @@ export function Investigation() {
     );
   }
 
-  const stepOrder = ['overview', 'elasticsearch', 'gnn', 'counterfactual'];
+  const stepOrder = ['overview', 'elasticsearch', 'gnn', 'counterfactual', 'agent'];
   const currentIdx = stepOrder.indexOf(currentStep);
 
   const steps = [
     { id: 'overview', label: 'Overview', icon: Clock, completed: currentIdx > 0 },
     { id: 'elasticsearch', label: 'Log Analysis', icon: Database, completed: currentIdx > 1 },
     { id: 'gnn', label: 'Network Graph', icon: Network, completed: currentIdx > 2 },
-    { id: 'counterfactual', label: 'Explainability', icon: Brain, completed: false },
+    { id: 'counterfactual', label: 'Explainability', icon: Brain, completed: currentIdx > 3 },
+    { id: 'agent', label: 'AI Agent', icon: MessageSquare, completed: false },
   ];
 
   const getCurrentStepIndex = () => {
@@ -276,8 +283,130 @@ export function Investigation() {
           cfLoading ? (
             <StepLoading label="Computing counterfactual explanations…" />
           ) : counterfactual ? (
-            <CounterfactualStep data={counterfactual} />
+            <div className="space-y-6">
+              <CounterfactualStep data={counterfactual} />
+              <div className="flex justify-end">
+                <Button onClick={() => setCurrentStep('agent')} className="bg-blue-600 hover:bg-blue-700">
+                  Continue to AI Agent
+                  <ChevronRight className="ml-2 w-4 h-4" />
+                </Button>
+              </div>
+            </div>
           ) : <StepEmpty label="No counterfactual data available for this incident." />
+        )}
+
+        {currentStep === 'agent' && (
+          <div className="space-y-6">
+            <Card className="bg-slate-900 border-slate-800">
+              <CardHeader>
+                <CardTitle className="text-slate-100 flex items-center gap-2">
+                  <MessageSquare className="w-5 h-5 text-purple-400" />
+                  AI Agent Investigation
+                </CardTitle>
+                <CardDescription className="text-slate-400">
+                  Ask the LLM agent to investigate this incident using tools — Elasticsearch queries, GNN analysis, and counterfactual reasoning.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {/* Query input */}
+                <div className="flex gap-2 mb-6">
+                  <Input
+                    placeholder={`Investigate incident ${incidentId ?? ''}...`}
+                    value={agentQuery}
+                    onChange={(e) => setAgentQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !agentRunning && agentQuery.trim()) {
+                        startAgent(agentQuery.trim() || `Investigate incident ${incidentId}`);
+                      }
+                    }}
+                    className="bg-slate-800 border-slate-700 text-slate-100 placeholder:text-slate-500"
+                    disabled={agentRunning}
+                  />
+                  {agentRunning ? (
+                    <Button variant="destructive" onClick={stopAgent} className="px-4">
+                      <StopCircle className="w-4 h-4 mr-2" />
+                      Stop
+                    </Button>
+                  ) : (
+                    <Button
+                      onClick={() => startAgent(agentQuery.trim() || `Investigate incident ${incidentId}`)}
+                      disabled={!agentQuery.trim() && !incidentId}
+                      className="bg-purple-600 hover:bg-purple-700 px-4"
+                    >
+                      <Send className="w-4 h-4 mr-2" />
+                      Ask Agent
+                    </Button>
+                  )}
+                </div>
+
+                {/* Agent error */}
+                {agentError && (
+                  <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
+                    <p className="text-sm text-red-400">{agentError}</p>
+                  </div>
+                )}
+
+                {/* Stream events */}
+                {agentEvents.length > 0 && (
+                  <div className="space-y-3 max-h-[500px] overflow-y-auto pr-2">
+                    {agentEvents.map((event, idx) => (
+                      <div key={idx} className={`p-3 rounded-lg border ${
+                        event.type === 'thinking' ? 'bg-blue-500/5 border-blue-500/20' :
+                        event.type === 'tool_call' ? 'bg-yellow-500/5 border-yellow-500/20' :
+                        event.type === 'tool_result' ? 'bg-green-500/5 border-green-500/20' :
+                        event.type === 'conclusion' ? 'bg-purple-500/5 border-purple-500/20' :
+                        event.type === 'error' ? 'bg-red-500/5 border-red-500/20' :
+                        'bg-slate-800/50 border-slate-700'
+                      }`}>
+                        <div className="flex items-center gap-2 mb-1">
+                          <Badge variant="outline" className={`text-xs ${
+                            event.type === 'thinking' ? 'text-blue-400 border-blue-500/30' :
+                            event.type === 'tool_call' ? 'text-yellow-400 border-yellow-500/30' :
+                            event.type === 'tool_result' ? 'text-green-400 border-green-500/30' :
+                            event.type === 'conclusion' ? 'text-purple-400 border-purple-500/30' :
+                            event.type === 'error' ? 'text-red-400 border-red-500/30' :
+                            'text-slate-400 border-slate-600'
+                          }`}>
+                            {event.type}
+                          </Badge>
+                          {event.tool && (
+                            <span className="text-xs text-slate-500 font-mono">{event.tool}</span>
+                          )}
+                        </div>
+                        {event.content && (
+                          <p className="text-sm text-slate-300 whitespace-pre-wrap">{event.content}</p>
+                        )}
+                        {event.result && (
+                          <pre className="text-xs text-slate-400 mt-2 overflow-x-auto max-h-32 bg-slate-900/50 p-2 rounded">
+                            {event.result}
+                          </pre>
+                        )}
+                      </div>
+                    ))}
+                    {agentRunning && (
+                      <div className="flex items-center gap-2 p-3 text-slate-400">
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span className="text-sm">Agent is working…</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Empty state */}
+                {agentEvents.length === 0 && !agentRunning && (
+                  <div className="text-center py-8">
+                    <Brain className="w-12 h-12 mx-auto mb-4 text-slate-600" />
+                    <p className="text-slate-400 text-sm">
+                      Enter a question to start the AI agent investigation.
+                    </p>
+                    <p className="text-slate-500 text-xs mt-1">
+                      The agent will use Elasticsearch, GNN analysis, and counterfactual tools automatically.
+                    </p>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
         )}
       </div>
     </div>

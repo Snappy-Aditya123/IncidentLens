@@ -1,7 +1,7 @@
 {
-  "source": "SSDP_Flood test subset",
-  "total_rows": 10000,
-  "chunk_size": 10000,
+  "source": "SSDP_Flood dataset (Kitsune)",
+  "total_rows": 500,
+  "chunk_size": 100000,
   "num_files": 1,
   "files": [
     "packets_0000.json"
@@ -22,5 +22,6 @@
     "payload_length",
     "packet_length",
     "label"
-  ]
+  ],
+  "created_at": "2026-02-27T07:57:26Z"
 }

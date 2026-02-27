@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router';
-import { useIncidents } from '../hooks/useApi';
+import { useIncidents, useBackendHealth, useSeverityBreakdown, useMLAnomalies, useMLInfluencers } from '../hooks/useApi';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
@@ -16,13 +16,20 @@ import {
   Database,
   Network,
   RefreshCw,
-  Zap
+  Zap,
+  Heart,
+  BarChart3,
+  Brain
 } from 'lucide-react';
 import { format } from 'date-fns';
 
 export function Dashboard() {
   const [searchQuery, setSearchQuery] = useState('');
   const { data: incidents, loading, error, refetch } = useIncidents();
+  const { data: health } = useBackendHealth();
+  const { data: severityBreakdown } = useSeverityBreakdown();
+  const { data: mlAnomalies } = useMLAnomalies();
+  const { data: mlInfluencers } = useMLInfluencers();
 
   const allIncidents = incidents ?? [];
 
@@ -67,7 +74,20 @@ export function Dashboard() {
                 <Shield className="w-6 h-6 text-white" />
               </div>
               <div>
-                <h1 className="text-slate-100">IncidentLens</h1>
+                <div className="flex items-center gap-2">
+                  <h1 className="text-slate-100">IncidentLens</h1>
+                  {health ? (
+                    <span className="flex items-center gap-1 text-xs" title={`Server: ${health.server}, ES: ${health.elasticsearch}`}>
+                      <Heart className="w-3 h-3 text-green-400 fill-green-400" />
+                      <span className="text-green-400">Online</span>
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-1 text-xs" title="Backend unreachable">
+                      <Heart className="w-3 h-3 text-slate-500" />
+                      <span className="text-slate-500">Offline</span>
+                    </span>
+                  )}
+                </div>
                 <p className="text-sm text-slate-400">AI-Powered Network Investigation</p>
               </div>
             </div>
@@ -146,6 +166,99 @@ export function Dashboard() {
             <CardContent>
               <div className="text-2xl text-slate-100">{allIncidents.length}</div>
               <p className="text-xs text-slate-500 mt-1">Last 24 hours</p>
+            </CardContent>
+          </Card>
+        </div>
+
+        {/* Severity Breakdown + ML Insights */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+          {/* Severity Distribution */}
+          <Card className="bg-slate-900 border-slate-800">
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+              <CardTitle className="text-sm text-slate-400">Severity Distribution</CardTitle>
+              <BarChart3 className="w-4 h-4 text-yellow-400" />
+            </CardHeader>
+            <CardContent>
+              {severityBreakdown ? (
+                <div className="space-y-2">
+                  {Object.entries(severityBreakdown.severity_levels).map(([level, count]) => {
+                    const pct = severityBreakdown.total_flows > 0
+                      ? Math.round((count / severityBreakdown.total_flows) * 100) : 0;
+                    const barColor = level === 'critical' ? 'bg-red-500' : level === 'high' ? 'bg-orange-500' : level === 'medium' ? 'bg-yellow-500' : 'bg-blue-500';
+                    return (
+                      <div key={level} className="flex items-center gap-2">
+                        <span className="text-xs text-slate-400 w-16 capitalize">{level}</span>
+                        <div className="flex-1 h-2 bg-slate-800 rounded-full overflow-hidden">
+                          <div className={`h-full ${barColor} rounded-full`} style={{ width: `${pct}%` }} />
+                        </div>
+                        <span className="text-xs text-slate-300 w-12 text-right">{count}</span>
+                      </div>
+                    );
+                  })}
+                  <p className="text-xs text-slate-500 mt-1">{severityBreakdown.total_flows} total flows</p>
+                </div>
+              ) : (
+                <p className="text-xs text-slate-500">No data available</p>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* ML Anomalies */}
+          <Card className="bg-slate-900 border-slate-800">
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+              <CardTitle className="text-sm text-slate-400">ML Anomalies</CardTitle>
+              <Brain className="w-4 h-4 text-purple-400" />
+            </CardHeader>
+            <CardContent>
+              {mlAnomalies && mlAnomalies.count > 0 ? (
+                <div className="space-y-2">
+                  <div className="text-2xl text-slate-100">{mlAnomalies.count}</div>
+                  <p className="text-xs text-slate-500">High-score anomalies detected</p>
+                  {mlAnomalies.records.slice(0, 3).map((rec, i) => (
+                    <div key={i} className="flex items-center justify-between text-xs">
+                      <span className="text-slate-400 truncate max-w-[140px]">{rec.function}{rec.field_name ? ` (${rec.field_name})` : ''}</span>
+                      <Badge variant="outline" className={rec.record_score >= 90 ? 'text-red-400 border-red-500/30' : rec.record_score >= 75 ? 'text-orange-400 border-orange-500/30' : 'text-yellow-400 border-yellow-500/30'}>
+                        {Math.round(rec.record_score)}
+                      </Badge>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div>
+                  <div className="text-2xl text-slate-100">0</div>
+                  <p className="text-xs text-slate-500">No anomalies above threshold</p>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* ML Influencers */}
+          <Card className="bg-slate-900 border-slate-800">
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+              <CardTitle className="text-sm text-slate-400">Top Influencers</CardTitle>
+              <TrendingUp className="w-4 h-4 text-cyan-400" />
+            </CardHeader>
+            <CardContent>
+              {mlInfluencers && mlInfluencers.count > 0 ? (
+                <div className="space-y-2">
+                  {mlInfluencers.influencers.slice(0, 5).map((inf, i) => (
+                    <div key={i} className="flex items-center justify-between text-xs">
+                      <span className="text-slate-400 truncate max-w-[120px]" title={`${inf.influencer_field_name}: ${inf.influencer_field_value}`}>
+                        {inf.influencer_field_value}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <div className="w-16 h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                          <div className="h-full bg-cyan-500 rounded-full" style={{ width: `${Math.min(inf.influencer_score, 100)}%` }} />
+                        </div>
+                        <span className="text-slate-300 w-8 text-right">{Math.round(inf.influencer_score)}</span>
+                      </div>
+                    </div>
+                  ))}
+                  <p className="text-xs text-slate-500 mt-1">{mlInfluencers.count} influencers found</p>
+                </div>
+              ) : (
+                <p className="text-xs text-slate-500">No influencer data available</p>
+              )}
             </CardContent>
           </Card>
         </div>

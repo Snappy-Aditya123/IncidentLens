@@ -1040,8 +1040,17 @@ def train_temporal_gnn(
     seq_len: int = 5,
     batch_size: int = 8,
     use_ode: bool = False,
+    train_ratio: float = 0.70,
+    val_ratio: float = 0.15,
 ) -> TemporalGNNEncoder:
     """Train an EvolvingGNN (or ODE variant) on temporal sequences.
+
+    **Time-based train / val / test split:**
+
+    Sequences are assumed to be in chronological order.  The first
+    *train_ratio* fraction is used for gradient updates, the next
+    *val_ratio* for early-stopping (best val F1), and the remainder
+    for a held-out test report.  This prevents temporal leakage.
 
     **Optimised** (vs. previous version):
 
@@ -1063,6 +1072,8 @@ def train_temporal_gnn(
     seq_len : sequence length (stored in checkpoint for consistency)
     batch_size : number of sequences per gradient update
     use_ode : if True, use Neural ODE weight evolution (requires torchdiffeq)
+    train_ratio : fraction of sequences for training (default 0.70)
+    val_ratio : fraction of sequences for validation (default 0.15)
 
     Returns
     -------
@@ -1106,33 +1117,75 @@ def train_temporal_gnn(
         [g.to(device) for g in seq] for seq in sequences
     ]
 
-    # Compute class balance for weighted loss
-    all_labels = torch.cat([seq[-1].y for seq in sequences_dev])
+    # ── Time-based train / val / test split ──
+    n_total = len(sequences_dev)
+    n_train = max(1, int(n_total * train_ratio))
+    n_val = max(1, int(n_total * val_ratio))
+    # Ensure at least 1 sequence in each split when possible
+    if n_train + n_val >= n_total:
+        # Tiny dataset — use all for training, no val/test
+        n_train = n_total
+        n_val = 0
+    n_test = n_total - n_train - n_val
+
+    train_seqs = sequences_dev[:n_train]
+    val_seqs = sequences_dev[n_train:n_train + n_val]
+    test_seqs = sequences_dev[n_train + n_val:]
+
+    # Compute class balance for weighted loss (train set only)
+    all_labels = torch.cat([seq[-1].y for seq in train_seqs])
     pos = (all_labels == 1).sum().item()
     neg = (all_labels == 0).sum().item()
     pos_weight = torch.tensor(neg / max(pos, 1), dtype=torch.float32, device=device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
-    n_seq = len(sequences_dev)
+    n_seq = len(train_seqs)
 
     print(f"\n{'='*60}")
     print(f"TEMPORAL GNN TRAINING ({variant_label})")
     print(f"{'='*60}")
-    print(f"  Sequences:      {n_seq}")
+    print(f"  Total seqs:     {n_total}")
+    print(f"  Train / Val / Test: {n_train} / {n_val} / {n_test}")
     print(f"  Batch size:     {batch_size}")
     print(f"  Node feat dim:  {node_feat_dim}")
     print(f"  Edge feat dim:  {edge_feat_dim}")
     print(f"  Hidden dim:     {hidden_dim}")
-    print(f"  Pos / Neg:      {pos} / {neg}")
+    print(f"  Pos / Neg:      {pos} / {neg}  (train set)")
     print(f"  Pos weight:     {pos_weight.item():.4f}")
     print(f"  Device:         {device}")
     print(f"{'='*60}\n")
 
-    best_f1 = 0.0
+    best_val_f1 = 0.0
     best_state = None
+    patience_counter = 0
+    patience = 10  # early-stopping patience
 
     # Pre-compute a fixed random permutation seed per epoch for shuffling
     rng = np.random.default_rng(42)
+
+    # ── Helper: evaluate model on a set of sequences (no grad) ──
+    def _evaluate(seqs: list[list[Data]]) -> dict:
+        model.eval()
+        ev_probs: list[np.ndarray] = []
+        ev_true: list[np.ndarray] = []
+        ev_loss = 0.0
+        with torch.no_grad():
+            for seq in seqs:
+                labels = seq[-1].y.float()
+                logits = model(seq)
+                logits = torch.nan_to_num(logits, nan=0.0, posinf=0.0, neginf=0.0)
+                ev_loss += criterion(logits, labels).item()
+                ev_probs.append(torch.sigmoid(logits).cpu().numpy())
+                ev_true.append(labels.cpu().numpy())
+        probs = np.concatenate(ev_probs)
+        true = np.concatenate(ev_true).astype(int)
+        preds = (probs >= 0.5).astype(int)
+        return {
+            "loss": ev_loss / max(len(seqs), 1),
+            "f1": f1_score(true, preds, zero_division=0),
+            "prec": precision_score(true, preds, zero_division=0),
+            "rec": recall_score(true, preds, zero_division=0),
+        }
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -1140,18 +1193,17 @@ def train_temporal_gnn(
         all_probs: list[np.ndarray] = []
         all_true: list[np.ndarray] = []
 
-        # Shuffle sequence order each epoch for stochastic gradient descent
+        # Shuffle *train* sequence order each epoch
         perm = rng.permutation(n_seq)
 
         # ── Mini-batch gradient accumulation ──
         optimizer.zero_grad()
 
         for step_idx, seq_idx in enumerate(perm):
-            # Determine correct divisor — handles final partial batch
             batch_start = (step_idx // batch_size) * batch_size
             actual_batch = min(batch_size, n_seq - batch_start)
 
-            seq = sequences_dev[int(seq_idx)]
+            seq = train_seqs[int(seq_idx)]
             labels = seq[-1].y.float()
 
             logits = model(seq)
@@ -1169,37 +1221,63 @@ def train_temporal_gnn(
                 all_probs.append(torch.sigmoid(logits).cpu().numpy())
                 all_true.append(labels.cpu().numpy())
 
-            # Step at each mini-batch boundary (position-based, not count-based)
             if (step_idx + 1) % batch_size == 0 or step_idx == n_seq - 1:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
                 optimizer.step()
                 optimizer.zero_grad()
 
-        # Epoch metrics
+        # ── Train metrics ──
         probs = np.concatenate(all_probs)
         true = np.concatenate(all_true)
         preds = (probs >= 0.5).astype(int)
         true_int = true.astype(int)
-        f1 = f1_score(true_int, preds, zero_division=0)
-        prec = precision_score(true_int, preds, zero_division=0)
-        rec = recall_score(true_int, preds, zero_division=0)
+        train_f1 = f1_score(true_int, preds, zero_division=0)
+        train_prec = precision_score(true_int, preds, zero_division=0)
+        train_rec = recall_score(true_int, preds, zero_division=0)
 
-        if f1 > best_f1:
-            best_f1 = f1
-            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+        # ── Validation metrics & early stopping ──
+        if val_seqs:
+            vm = _evaluate(val_seqs)
+            val_f1 = vm["f1"]
+            if val_f1 > best_val_f1:
+                best_val_f1 = val_f1
+                best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                patience_counter = 0
+            else:
+                patience_counter += 1
+        else:
+            # No validation split — track on train
+            val_f1 = train_f1
+            if train_f1 > best_val_f1:
+                best_val_f1 = train_f1
+                best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
         if epoch % 5 == 0 or epoch == 1:
-            print(
+            msg = (
                 f"  Epoch {epoch:3d} | Loss {epoch_loss / max(n_seq, 1):.6f} "
-                f"| F1 {f1:.4f} | Prec {prec:.4f} | Rec {rec:.4f}"
+                f"| Train F1 {train_f1:.4f}"
             )
+            if val_seqs:
+                msg += f" | Val F1 {val_f1:.4f}"
+            print(msg)
 
-    # Restore best weights if we found any positives
+        # Early stopping
+        if val_seqs and patience_counter >= patience:
+            print(f"  Early stopping at epoch {epoch} (no val improvement for {patience} epochs)")
+            break
+
+    # Restore best weights
     if best_state is not None:
         model.load_state_dict(best_state)
-        print(f"\n  Restored best model (F1={best_f1:.4f})")
+        label = "val" if val_seqs else "train"
+        print(f"\n  Restored best model ({label} F1={best_val_f1:.4f})")
 
     model.eval()
+
+    # ── Test set evaluation ──
+    if test_seqs:
+        tm = _evaluate(test_seqs)
+        print(f"\n  TEST SET  | F1 {tm['f1']:.4f} | Prec {tm['prec']:.4f} | Rec {tm['rec']:.4f}")
 
     # Save checkpoint
     encoder = TemporalGNNEncoder(
