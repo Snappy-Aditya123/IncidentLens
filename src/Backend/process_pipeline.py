@@ -12,6 +12,7 @@ import torch
 from src.Backend import wrappers
 from src.Backend.simulation import StreamSimulator
 from src.Backend.temporal_gnn import TemporalGNNEncoder, get_default_checkpoint
+from src.Backend.llm_reasoner import LLMReasoner
 
 
 # ============================================================
@@ -32,11 +33,11 @@ class RealTimeIncidentLens:
         self.stride = stride
         self.embedding_dim = embedding_dim
         self.debug = debug
-
+        
         # Elasticsearch
         self.es = wrappers.get_client()
         assert wrappers.ping(self.es), "Elasticsearch not reachable"
-
+        self.reasoner = LLMReasoner(self.es)
         wrappers.setup_all_indices(
             self.es,
             embedding_dim=embedding_dim,
@@ -67,7 +68,7 @@ class RealTimeIncidentLens:
         window_id: int,
         window_start: float,
         flows: List[dict],
-    ) -> Dict[str, Any] | None:
+        ) -> Dict[str, Any] | None:
 
         if not flows:
             return None
@@ -75,24 +76,11 @@ class RealTimeIncidentLens:
         print(f"\n========== WINDOW {window_id} ==========")
         print(f"Flows in window: {len(flows)}")
 
-        if self.debug:
-            print("\n[DEBUG] Raw flows:")
-            for f in flows[:3]:
-                print(f)
-
-        # ---------------------------------
-        # Convert to DataFrame
-        # ---------------------------------
         df = pd.DataFrame(flows)
 
         df["payload_length"] = 0
         df["packet_length"] = df["total_bytes"]
         df["timestamp"] = df["window_start"]
-
-        if self.debug:
-            print("\n[DEBUG] Processed DataFrame:")
-            print(df.head())
-            print("[DEBUG] Columns:", list(df.columns))
 
         # ---------------------------------
         # Build + Index Graphs
@@ -114,7 +102,7 @@ class RealTimeIncidentLens:
         print(f"[RT] Graph Edges: {graph.num_edges}")
 
         # ---------------------------------
-        # Generate Embeddings
+        # Generate + Index Embeddings
         # ---------------------------------
         flow_ids, embeddings, labels = wrappers.generate_embeddings(
             graphs,
@@ -131,10 +119,6 @@ class RealTimeIncidentLens:
 
         print(f"[RT] Indexed {n_indexed} flows")
         print(f"[RT] Indexed {n_emb} embeddings")
-
-        if self.debug and len(embeddings) > 0:
-            print("\n[DEBUG] Embedding shape:", embeddings.shape)
-            print("[DEBUG] First embedding vector:\n", embeddings[0])
 
         # ---------------------------------
         # GNN Anomaly Score
@@ -157,18 +141,49 @@ class RealTimeIncidentLens:
                     anomaly_score = anomaly_score.item()
 
         anomaly_score = float(anomaly_score)
-
         print(f"[RT] GNN Anomaly Score: {anomaly_score:.4f}")
 
         # ---------------------------------
         # Severity Breakdown (ES Aggregation)
         # ---------------------------------
+        breakdown = {}
         try:
             breakdown = wrappers.aggregate_severity_breakdown(es=self.es)
             print("[RT] Severity Distribution:", breakdown.get("severity"))
             print("[RT] Volume Distribution:", breakdown.get("volume"))
         except Exception:
             print("[RT] Severity aggregation unavailable.")
+
+        # ---------------------------------
+        # Top Anomalous Flows
+        # ---------------------------------
+        top = []
+        try:
+            top = wrappers.search_anomalous_flows(
+                min_prediction_score=0.7,
+                size=5,
+                es=self.es,
+            )
+        except Exception:
+            pass
+
+        # ---------------------------------
+        # LLM Trigger
+        # ---------------------------------
+        trigger = anomaly_score > 0.75
+
+        if trigger:
+            context = {
+                "window_id": window_id,
+                "gnn_score": anomaly_score,
+                "severity_breakdown": breakdown,
+                "top_anomalies": top,
+            }
+
+            insight = await self.reasoner.analyze_window(context)
+
+            print("\n=== LLM INVESTIGATION ===")
+            print(json.dumps(insight, indent=2))
 
         return {
             "window_id": window_id,

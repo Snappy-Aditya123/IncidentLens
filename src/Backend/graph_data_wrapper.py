@@ -285,6 +285,14 @@ def build_sliding_window_graphs(
     label_col: str = "label",
 ) -> tuple[list[Data], dict[int, str]]:
 
+    # Drop rows with missing IPs — pd.factorize codes NaN as -1
+    # which breaks the id_to_ip lookup downstream.
+    mask = packets_df["src_ip"].notna() & packets_df["dst_ip"].notna()
+    if not mask.all():
+        n_dropped = (~mask).sum()
+        packets_df = packets_df.loc[mask].reset_index(drop=True)
+        print(f"[graph] Dropped {n_dropped} rows with missing src/dst IP")
+
     ts_vals = packets_df["timestamp"].values.astype(np.float64)
     t_min, t_max = ts_vals.min(), ts_vals.max()
 
