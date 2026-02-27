@@ -227,15 +227,16 @@ export function Dashboard() {
                     </div>
                   ))}
                 </div>
-              ) : mlAnomalyError ? (
-                <div>
-                  <div className="text-2xl text-slate-100">—</div>
-                  <p className="text-xs text-red-400">Failed to load ML anomalies</p>
-                </div>
               ) : (
                 <div>
-                  <div className="text-2xl text-slate-100">0</div>
-                  <p className="text-xs text-slate-500">{!health ? 'Start backend to see ML data' : 'No anomalies above threshold'}</p>
+                  <div className="text-2xl text-slate-100">{mlAnomalyError ? '\u2014' : '0'}</div>
+                  <p className={`text-xs ${mlAnomalyError ? 'text-red-400' : 'text-slate-500'}`}>
+                    {mlAnomalyError
+                      ? 'Failed to load ML anomalies'
+                      : !health
+                        ? 'Start backend to see ML data'
+                        : 'No anomalies above threshold'}
+                  </p>
                 </div>
               )}
             </CardContent>
