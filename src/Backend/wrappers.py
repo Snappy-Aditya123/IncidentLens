@@ -424,16 +424,18 @@ def setup_index_templates(es: Elasticsearch | None = None, embedding_dim: int = 
 
     for name, patterns, body in templates:
         try:
-            es.indices.put_template(
+            es.indices.put_index_template(
                 name=name,
                 body={
                     "index_patterns": patterns,
-                    "settings": body.get("settings", {}),
-                    "mappings": body.get("mappings", {}),
+                    "template": {
+                        "settings": body.get("settings", {}),
+                        "mappings": body.get("mappings", {}),
+                    },
                 },
             )
             results[name] = True
-            logger.info("Index template '%s' created", name)
+            logger.info("Index template '%s' created (composable)", name)
         except Exception as e:
             results[name] = False
             logger.warning("Index template '%s' failed: %s", name, e)
@@ -701,6 +703,16 @@ def _embeddings_mapping(dim: int = EMBEDDINGS_MAPPING_DIM) -> dict:
     }
 
 
+def _get_existing_embedding_dim(es: Elasticsearch, index_name: str) -> int | None:
+    """Return the dense_vector dims of an existing embeddings index, or None."""
+    try:
+        mapping = es.indices.get_mapping(index=index_name)
+        props = mapping[index_name]["mappings"].get("properties", {})
+        return props.get("embedding", {}).get("dims")
+    except Exception:
+        return None
+
+
 def create_index(
     index_name: str,
     body: dict,
@@ -714,7 +726,7 @@ def create_index(
             es.indices.delete(index=index_name)
             logger.info("Deleted existing index %s", index_name)
         else:
-            logger.info("Index %s already exists — skipping.", index_name)
+            logger.info("Index %s already exists \u2014 skipping.", index_name)
             return False
     es.indices.create(index=index_name, body=body)
     logger.info("Created index %s", index_name)
@@ -743,13 +755,25 @@ def setup_all_indices(
     setup_ingest_pipeline(es)
     setup_index_templates(es, embedding_dim=embedding_dim)
 
+    # Auto-detect dimension mismatch on existing embeddings index and
+    # force recreation so GNN-produced vectors can always be indexed.
+    emb_delete = delete_existing
+    if not emb_delete and es.indices.exists(index=EMBEDDINGS_INDEX):
+        existing_dim = _get_existing_embedding_dim(es, EMBEDDINGS_INDEX)
+        if existing_dim is not None and existing_dim != embedding_dim:
+            logger.warning(
+                "Embeddings index has dims=%d but model needs %d \u2014 recreating.",
+                existing_dim, embedding_dim,
+            )
+            emb_delete = True
+
     return {
         FLOWS_INDEX: create_index(FLOWS_INDEX, FLOWS_MAPPING, es, delete_existing),
         COUNTERFACTUALS_INDEX: create_index(
             COUNTERFACTUALS_INDEX, COUNTERFACTUALS_MAPPING, es, delete_existing
         ),
         EMBEDDINGS_INDEX: create_index(
-            EMBEDDINGS_INDEX, _embeddings_mapping(embedding_dim), es, delete_existing
+            EMBEDDINGS_INDEX, _embeddings_mapping(embedding_dim), es, emb_delete
         ),
         GRAPH_SUMMARIES_INDEX: create_index(
             GRAPH_SUMMARIES_INDEX, GRAPH_SUMMARIES_MAPPING, es, delete_existing
