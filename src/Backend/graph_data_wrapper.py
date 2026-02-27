@@ -332,9 +332,6 @@ def build_sliding_window_graphs(
             pkt_idx, win_idx = np.nonzero(result)
         if len(pkt_idx) == 0:
             return [], {}
-        # Re-encode protocol / port after filtering
-        proto_codes_full, _ = pd.factorize(packets_df["protocol"].values, sort=True)
-        port_codes_full, _ = pd.factorize(packets_df["dst_port"].values, sort=True)
         import logging
         logging.getLogger(__name__).info(
             "Dropped %d rows with NaN src_ip/dst_ip", n_dropped)

@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import List, Optional
 
 import pandas as pd
-import torch
 
 import src.Backend.wrappers as wrappers
 from src.Backend.simulation import StreamSimulator
@@ -183,17 +182,13 @@ class RealTimeIncidentLens:
 
         wrappers.index_embeddings(flow_ids, embeddings, labels, es=self.es)
 
-        enc = wrappers.get_gnn_encoder()
-        if enc is not None:
-            try:
-                with torch.no_grad():
-                    # predict() returns per-edge logits of shape (E,)
-                    logits = enc.predict(graph)
-                    probs = torch.sigmoid(logits)
-                    score = float(probs.mean().item())
-                    print(f"[RT] GNN anomaly score: {score:.4f}")
-            except Exception as exc:
-                logger.warning("GNN scoring failed: %s", exc)
+        # index_graphs_bulk already ran predict_labels() on each graph,
+        # storing sigmoid-applied per-edge scores in graph.pred_scores.
+        # Reuse that instead of running a redundant forward pass.
+        pred_scores = getattr(graph, "pred_scores", None)
+        if pred_scores is not None and pred_scores.numel() > 0:
+            score = float(pred_scores.mean().item())
+            print(f"[RT] GNN anomaly score: {score:.4f}")
 
         try:
             breakdown = wrappers.aggregate_severity_breakdown(es=self.es)

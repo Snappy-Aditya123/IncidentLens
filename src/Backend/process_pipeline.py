@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import List, Dict, Any
 
 import pandas as pd
-import torch
 
 from src.Backend import wrappers
 from src.Backend.simulation import StreamSimulator
@@ -98,6 +97,12 @@ class RealTimeIncidentLens:
 
         if "payload_length" not in df.columns:
             df["payload_length"] = 0
+        if "dst_port" not in df.columns:
+            df["dst_port"] = 0
+        if "protocol" not in df.columns:
+            df["protocol"] = 0
+        if "label" not in df.columns:
+            df["label"] = 0
 
         # NOTE: Pre-aggregated flows → mean_iat / std_iat will be zero.
         # Accepted limitation; the GNN's remaining features still carry signal.
@@ -152,20 +157,16 @@ class RealTimeIncidentLens:
         # ---------------------------------
         # GNN Anomaly Score
         # ---------------------------------
+        # index_graphs_bulk already ran predict_labels() on each graph,
+        # storing sigmoid-applied per-edge scores in graph.pred_scores.
+        # Reuse that instead of running a redundant forward pass.
         anomaly_score = 0.0
-        gnn = wrappers.get_gnn_encoder()
-
-        if gnn is not None:
-            try:
-                with torch.no_grad():
-                    # predict() returns per-edge logits of shape (E,)
-                    logits = gnn.predict(graph)
-                    probs = torch.sigmoid(logits)
-                    # Window-level anomaly score = mean edge probability
-                    anomaly_score = float(probs.mean().item())
-            except Exception as exc:
-                print(f"[RT] GNN scoring failed: {exc}")
-                anomaly_score = 0.0
+        pred_scores = getattr(graph, "pred_scores", None)
+        if pred_scores is not None and pred_scores.numel() > 0:
+            anomaly_score = float(pred_scores.mean().item())
+        else:
+            # Fallback: no GNN encoder was registered, so no scores available
+            pass
 
         print(f"[RT] GNN Anomaly Score: {anomaly_score:.4f}")
 
